@@ -1,0 +1,5 @@
+{
+  "name": "StyleMimic AI",
+  "description": "A sophisticated tool to analyze text transcripts, extract stylistic DNA, and generate new content in that exact persona using Gemini 2.5.",
+  "requestFramePermissions": []
+}
