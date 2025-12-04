@@ -1,7 +1,9 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, AlignLeft, Pencil, Check, Settings2, Folder, Key } from 'lucide-react';
+import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, AlignLeft, Pencil, Check, Settings2, Folder, Key, Lock, LogIn } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { analyzeTranscript, generateScript, suggestTravelLocations } from './services/geminiService';
+import { authenticate } from './services/authService';
+import AdminPanel from './components/AdminPanel';
 import { StyleProfile, Tab, AppState, ContentType, LocationSuggestion } from './types';
 import StyleRadar from './components/RadarChart';
 
@@ -26,7 +28,13 @@ const DEFAULT_PROFILE: StyleProfile = {
 };
 
 const App: React.FC = () => {
-  // API Key State
+  // --- AUTH STATE ---
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [licenseKey, setLicenseKey] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isCheckingAuth, setIsCheckingAuth] = useState(false);
+
+  // --- APP STATE ---
   const [apiKey, setApiKey] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('styleMimic_apiKey') || '';
@@ -36,7 +44,7 @@ const App: React.FC = () => {
   const [tempApiKey, setTempApiKey] = useState('');
 
   const [activeTab, setActiveTab] = useState<Tab>(Tab.ANALYZE);
-  const [appState, setAppState] = useState<AppState>(AppState.IDLE);
+  const [appState, setAppState] = useState<AppState>(AppState.LOCKED); // Start Locked
   
   // Analysis State
   const [transcripts, setTranscripts] = useState<string[]>(['']);
@@ -48,7 +56,6 @@ const App: React.FC = () => {
   const [generatedScript, setGeneratedScript] = useState<string>('');
   
   // Word Count State
-  // Default: 250 for travel (per spot), 2000 for general (total)
   const [targetLength, setTargetLength] = useState<number>(2000);
   
   // Travel Specific State
@@ -61,21 +68,19 @@ const App: React.FC = () => {
       try {
         const saved = localStorage.getItem('styleMimic_profiles');
         let parsed = saved ? JSON.parse(saved) : [DEFAULT_PROFILE];
-        // Migration: Ensure all profiles have a contentType
         parsed = parsed.map((p: any) => ({
             ...p,
             contentType: p.contentType || 'general'
         }));
         return parsed;
       } catch (e) {
-        console.error("Failed to load profiles from local storage", e);
         return [DEFAULT_PROFILE];
       }
     }
     return [DEFAULT_PROFILE];
   });
 
-  // Modal State for Naming/Renaming
+  // Modal State
   const [modalState, setModalState] = useState<{
     isOpen: boolean;
     mode: 'save' | 'rename';
@@ -90,14 +95,63 @@ const App: React.FC = () => {
     inputContentType: 'general'
   });
 
+  // CHECK SESSION ON LOAD
+  useEffect(() => {
+    const session = sessionStorage.getItem('styleMimic_session');
+    if (session === 'valid') {
+      setIsAuthenticated(true);
+      setAppState(AppState.IDLE);
+    } else if (session === 'admin') {
+      setIsAuthenticated(true);
+      setAppState(AppState.ADMIN_DASHBOARD);
+    } else {
+      setAppState(AppState.LOCKED);
+    }
+  }, []);
+
   // Save to LocalStorage whenever profiles change
   useEffect(() => {
     try {
       localStorage.setItem('styleMimic_profiles', JSON.stringify(savedProfiles));
     } catch (e) {
-      console.error("Failed to save profiles to local storage", e);
+      console.error("Failed to save profiles", e);
     }
   }, [savedProfiles]);
+
+  // --- HANDLERS ---
+
+  const handleLogin = async () => {
+    if (!licenseKey.trim()) return;
+    setIsCheckingAuth(true);
+    setAuthError('');
+
+    try {
+      const role = await authenticate(licenseKey);
+      
+      if (role === 'admin') {
+        sessionStorage.setItem('styleMimic_session', 'admin');
+        setIsAuthenticated(true);
+        setAppState(AppState.ADMIN_DASHBOARD);
+      } else if (role === 'user') {
+        sessionStorage.setItem('styleMimic_session', 'valid');
+        setIsAuthenticated(true);
+        setAppState(AppState.IDLE);
+      } else {
+        setAuthError('Invalid License Key');
+      }
+    } catch (e) {
+      setAuthError('Authentication error');
+    } finally {
+      setIsCheckingAuth(false);
+    }
+  };
+
+  const handleLogout = () => {
+    sessionStorage.removeItem('styleMimic_session');
+    setIsAuthenticated(false);
+    setAppState(AppState.LOCKED);
+    setLicenseKey('');
+  };
 
   const handleSaveApiKey = () => {
     if (tempApiKey.trim()) {
@@ -129,15 +183,11 @@ const App: React.FC = () => {
 
   const handleContentTypeChange = (type: ContentType) => {
     setContentType(type);
-    
-    // Set smart defaults for word count based on type
     if (type === 'travel') {
-      setTargetLength(250); // Per spot
+      setTargetLength(250);
     } else {
-      setTargetLength(2000); // Total script (Mid-range default)
+      setTargetLength(2000);
     }
-
-    // Reset travel state if switching away
     if (type !== 'travel') {
       setShowLocationSelector(false);
       setLocations([]);
@@ -146,17 +196,15 @@ const App: React.FC = () => {
 
   const handleAnalyze = useCallback(async () => {
     const combinedTranscript = transcripts.filter(t => t.trim() !== '').join('\n\n*** NEXT TRANSCRIPT ***\n\n');
-
     if (!combinedTranscript.trim()) return;
-    
     setAppState(AppState.ANALYZING);
     try {
       const profile = await analyzeTranscript(combinedTranscript, apiKey);
       setCurrentProfile(profile);
-      setActiveTab(Tab.GENERATE); // Auto switch to generate to show the flow
+      setActiveTab(Tab.GENERATE);
     } catch (error) {
       console.error(error);
-      alert("Failed to analyze text. Please check your API Key or try again.");
+      alert("Failed to analyze text. Please check your API Key.");
     } finally {
       setAppState(AppState.IDLE);
     }
@@ -164,7 +212,6 @@ const App: React.FC = () => {
 
   const handleLocationSearch = async (keepSelected: boolean = false) => {
     if (!topic.trim() || !currentProfile) return;
-    
     setAppState(AppState.SUGGESTING_LOCATIONS);
     try {
       let currentSelection: LocationSuggestion[] = [];
@@ -173,7 +220,6 @@ const App: React.FC = () => {
 
       if (keepSelected) {
         currentSelection = locations.filter(l => l.isSelected);
-        // Exclude everything currently on screen to avoid dupes, but keep selected ones in the final list
         excludeList = locations.map(l => l.name);
         countNeeded = 20 - currentSelection.length;
       }
@@ -184,7 +230,6 @@ const App: React.FC = () => {
       } else {
          setLocations(currentSelection);
       }
-      
       setShowLocationSelector(true);
     } catch (error) {
       console.error(error);
@@ -202,17 +247,12 @@ const App: React.FC = () => {
 
   const handleGenerate = useCallback(async () => {
     if (!topic.trim() || !currentProfile) return;
-    
-    // For travel, ensure we have selections if the selector is active
     const selectedLocs = contentType === 'travel' ? locations.filter(l => l.isSelected) : [];
-    
     setAppState(AppState.GENERATING);
     setGeneratedScript('');
     try {
       const script = await generateScript(topic, currentProfile, contentType, selectedLocs, targetLength, apiKey);
       setGeneratedScript(script);
-
-      // Force close the selector view to show results
       if (contentType === 'travel') {
         setShowLocationSelector(false);
       }
@@ -226,17 +266,10 @@ const App: React.FC = () => {
 
   const handleCopyToClipboard = () => {
     if (!generatedScript) return;
-
-    // Create a temporary hidden DOM element
     const tempDiv = document.createElement('div');
-    
-    // Position it off-screen but keep it part of the DOM
     tempDiv.style.position = 'fixed';
     tempDiv.style.left = '-9999px';
     tempDiv.style.top = '0';
-    
-    // KEY: Force White Background and Black Text on this container
-    // Added !important to be absolutely sure
     tempDiv.style.setProperty('background-color', '#ffffff', 'important');
     tempDiv.style.setProperty('color', '#000000', 'important');
     tempDiv.style.fontFamily = 'Arial, sans-serif';
@@ -244,7 +277,6 @@ const App: React.FC = () => {
     tempDiv.style.lineHeight = '1.5';
     tempDiv.style.padding = '20px';
     
-    // Build inner HTML from Markdown
     const lines = generatedScript.split('\n');
     let innerHTML = '';
 
@@ -254,15 +286,10 @@ const App: React.FC = () => {
         innerHTML += '<br>';
         return;
       }
-      
-      // Basic escaping
       text = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      
-      // Inline Markdown parsing
       text = text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
       text = text.replace(/\*(.*?)\*/g, '<i>$1</i>');
 
-      // Styles applied explicitly to each block element to be double safe
       const blockStyle = "color: #000000 !important; margin-bottom: 10px;";
       const h1Style = "color: #000000 !important; font-size: 20pt; font-weight: bold; margin-top: 20px; margin-bottom: 10px;";
       const h2Style = "color: #000000 !important; font-size: 16pt; font-weight: bold; margin-top: 15px; margin-bottom: 8px;";
@@ -283,21 +310,15 @@ const App: React.FC = () => {
 
     tempDiv.innerHTML = innerHTML;
     document.body.appendChild(tempDiv);
-
     try {
       const range = document.createRange();
       range.selectNodeContents(tempDiv);
       const selection = window.getSelection();
-      
       if (selection) {
         selection.removeAllRanges();
         selection.addRange(range);
-        
-        // Execute the "Copy" command - this copies the rendered DOM with styles
         const successful = document.execCommand('copy');
-        
         selection.removeAllRanges();
-        
         if (successful) {
           alert("Success! Formatted text copied for Google Docs.");
         } else {
@@ -305,7 +326,6 @@ const App: React.FC = () => {
         }
       }
     } catch (err) {
-      console.error("Copy failed:", err);
       navigator.clipboard.writeText(generatedScript);
       alert("Could not copy formatting. Copied plain text instead.");
     } finally {
@@ -313,7 +333,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Open modal for saving new profile
   const handleOpenSaveModal = () => {
     if (currentProfile) {
       setModalState({
@@ -326,7 +345,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Open modal for renaming existing profile
   const handleOpenRenameModal = (profile: StyleProfile) => {
     setModalState({
       isOpen: true,
@@ -342,7 +360,6 @@ const App: React.FC = () => {
     if (!name) return;
 
     if (modalState.mode === 'save' && currentProfile) {
-      // Saving new profile
       const newProfile = { 
           ...currentProfile, 
           name: name,
@@ -354,18 +371,15 @@ const App: React.FC = () => {
       });
       setCurrentProfile(newProfile);
     } else if (modalState.mode === 'rename' && modalState.targetId) {
-      // Renaming existing profile in library
       setSavedProfiles(prev => prev.map(p => 
         p.id === modalState.targetId 
           ? { ...p, name: name, contentType: modalState.inputContentType } 
           : p
       ));
-      
       if (currentProfile && currentProfile.id === modalState.targetId) {
         setCurrentProfile(prev => prev ? { ...prev, name: name, contentType: modalState.inputContentType } : null);
       }
     }
-
     setModalState(prev => ({ ...prev, isOpen: false }));
   };
 
@@ -373,8 +387,6 @@ const App: React.FC = () => {
     setCurrentProfile(profile);
     setActiveTab(Tab.GENERATE);
   };
-
-  const hasValidInput = transcripts.some(t => t.trim().length > 0);
 
   const contentTypes: { id: ContentType; label: string; icon: any }[] = [
     { id: 'general', label: 'General / Freeform', icon: FileText },
@@ -385,17 +397,91 @@ const App: React.FC = () => {
     { id: 'educational', label: 'Educational / How-To', icon: BookOpen },
   ];
 
-  const selectedLocationCount = locations.filter(l => l.isSelected).length;
-
-  // Determine slider props based on content type
   const sliderMin = contentType === 'travel' ? 100 : 1000;
   const sliderMax = contentType === 'travel' ? 500 : 5000;
   const sliderStep = contentType === 'travel' ? 10 : 250;
+  const selectedLocationCount = locations.filter(l => l.isSelected).length;
+  const hasValidInput = transcripts.some(t => t.trim().length > 0);
 
-  // IF NO API KEY IS SET, SHOW WELCOME SCREEN
+  // --- RENDER LOGIC ---
+
+  // 1. ADMIN DASHBOARD VIEW
+  if (appState === AppState.ADMIN_DASHBOARD) {
+    return <AdminPanel onLogout={handleLogout} />;
+  }
+
+  // 2. LOCK SCREEN (LICENSE CHECK)
+  if (appState === AppState.LOCKED) {
+    return (
+      <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
+        {/* Animated Background Effect */}
+        <div className="absolute inset-0 z-0 opacity-20">
+           <div className="absolute top-1/4 left-1/4 w-64 h-64 bg-neon-purple rounded-full blur-[100px]"></div>
+           <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-neon-cyan rounded-full blur-[100px]"></div>
+        </div>
+
+        <div className="relative z-10 max-w-md w-full bg-gray-900/80 backdrop-blur border border-gray-800 rounded-2xl p-8 shadow-2xl">
+          <div className="flex items-center gap-3 mb-8 justify-center">
+             <div className="w-12 h-12 rounded bg-gradient-to-br from-neon-cyan to-neon-purple flex items-center justify-center shadow-lg">
+                <Lock className="w-6 h-6 text-white" />
+             </div>
+             <h1 className="text-3xl font-bold tracking-tight">StyleMimic <span className="text-gray-500 font-normal">AI</span></h1>
+          </div>
+
+          <div className="space-y-6">
+             <div className="text-center">
+               <h2 className="text-xl font-bold text-white mb-2">Restricted Access</h2>
+               <p className="text-gray-400 text-sm">Please enter your License Key to proceed.</p>
+             </div>
+
+             <div className="relative">
+               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <Key className="h-5 w-5 text-gray-500" />
+               </div>
+               <input
+                 type="password"
+                 className={`block w-full pl-10 pr-3 py-4 border rounded-xl leading-5 bg-gray-950 text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-all ${authError ? 'border-red-500 focus:ring-red-500' : 'border-gray-700 focus:border-neon-cyan focus:ring-neon-cyan/50'}`}
+                 placeholder="License Key"
+                 value={licenseKey}
+                 onChange={(e) => {
+                   setLicenseKey(e.target.value);
+                   setAuthError('');
+                 }}
+                 onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+               />
+             </div>
+
+             {authError && (
+               <div className="bg-red-900/20 border border-red-900 text-red-400 text-sm p-3 rounded-lg text-center animate-in fade-in slide-in-from-top-1">
+                 {authError}
+               </div>
+             )}
+
+             <button
+               onClick={handleLogin}
+               disabled={isCheckingAuth || !licenseKey.trim()}
+               className="w-full flex justify-center items-center gap-2 py-4 border border-transparent text-sm font-bold rounded-xl text-black bg-neon-cyan hover:bg-cyan-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-neon-cyan transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+             >
+               {isCheckingAuth ? <Loader2 className="w-5 h-5 animate-spin" /> : <LogIn className="w-5 h-5" />}
+               Unlock Application
+             </button>
+             
+             <p className="text-xs text-center text-gray-600 mt-4">
+                Enter Admin Password here to access dashboard.
+             </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. API KEY SCREEN
   if (!apiKey) {
     return (
       <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-6 font-sans">
+         <button onClick={handleLogout} className="absolute top-6 right-6 text-gray-500 hover:text-white flex items-center gap-2">
+            <Lock className="w-4 h-4" /> Relock
+         </button>
          <div className="max-w-md w-full bg-gray-900 border border-gray-800 rounded-2xl p-8 shadow-2xl">
             <div className="flex items-center gap-3 mb-6 justify-center">
               <div className="w-10 h-10 rounded bg-gradient-to-br from-neon-cyan to-neon-purple flex items-center justify-center">
@@ -448,6 +534,7 @@ const App: React.FC = () => {
     );
   }
 
+  // 4. MAIN APPLICATION
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans selection:bg-neon-cyan selection:text-black relative">
       {/* Header */}
@@ -481,12 +568,20 @@ const App: React.FC = () => {
                 </button>
               ))}
             </nav>
+            <div className="h-6 w-px bg-gray-800 mx-2"></div>
             <button 
               onClick={handleClearApiKey}
-              className="text-gray-600 hover:text-red-400 transition-colors p-2"
-              title="Sign Out / Clear API Key"
+              className="text-gray-600 hover:text-neon-cyan transition-colors p-2"
+              title="Change API Key"
             >
               <Key className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={handleLogout}
+              className="text-gray-600 hover:text-red-400 transition-colors p-2"
+              title="Sign Out (Lock)"
+            >
+              <Lock className="w-4 h-4" />
             </button>
           </div>
         </div>

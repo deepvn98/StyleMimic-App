@@ -34,6 +34,8 @@ export interface LocationSuggestion {
 }
 
 export enum AppState {
+  LOCKED = 'LOCKED', // New: User needs to enter license
+  ADMIN_DASHBOARD = 'ADMIN_DASHBOARD', // New: Admin view
   IDLE = 'IDLE',
   ANALYZING = 'ANALYZING',
   SUGGESTING_LOCATIONS = 'SUGGESTING_LOCATIONS',
