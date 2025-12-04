@@ -34,9 +34,10 @@ export interface LocationSuggestion {
 }
 
 export enum AppState {
-  LOCKED = 'LOCKED', // New: User needs to enter license
-  ADMIN_DASHBOARD = 'ADMIN_DASHBOARD', // New: Admin view
-  IDLE = 'IDLE',
+  LOCKED = 'LOCKED', // Step 1: License
+  ENTER_API_KEY = 'ENTER_API_KEY', // Step 2: User API Key
+  ADMIN_DASHBOARD = 'ADMIN_DASHBOARD', // Admin view
+  IDLE = 'IDLE', // Step 3: App Ready
   ANALYZING = 'ANALYZING',
   SUGGESTING_LOCATIONS = 'SUGGESTING_LOCATIONS',
   GENERATING = 'GENERATING',
