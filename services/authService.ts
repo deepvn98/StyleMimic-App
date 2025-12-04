@@ -1,23 +1,24 @@
 /**
- * AUTH SERVICE
- * Handles license verification using SHA-256 Hashing.
- * This ensures the actual passwords are not stored in plain text.
+ * AUTH SERVICE (FIREBASE EDITION)
+ * Connects to Google Firestore to manage licenses in real-time.
  */
 
-// HARDCODED HASHES (SHA-256)
-// You can generate new hashes using the Admin Panel or console.
+import { db } from './firebase';
+import { collection, addDoc, getDocs, deleteDoc, doc, query, where, Timestamp } from 'firebase/firestore';
+
+// HARDCODED HASHES (Emergency Fallback)
 const DEFAULT_ADMIN_HASH = "f9a8880e608f658c7344f62770267252033c467e271607a363c4687d002a2468"; // "MASTER-ADMIN-2024"
 const DEFAULT_USER_HASH = "8c668b556f87425f168f1212876008892415170d10d65609424c5826f5540356"; // "STYLE-VIP-2024"
 
 export interface LicenseEntry {
-  id: string;
-  name: string; // Human readable name (e.g., "Client A")
+  id: string; // Firestore Document ID
+  name: string;
   hash: string;
   createdAt: number;
 }
 
 /**
- * Computes SHA-256 hash of a string
+ * Computes SHA-256 hash
  */
 export const hashString = async (input: string): Promise<string> => {
   const encoder = new TextEncoder();
@@ -28,95 +29,87 @@ export const hashString = async (input: string): Promise<string> => {
 };
 
 /**
- * Robust UUID generator that works in all contexts (unlike crypto.randomUUID)
+ * FETCH: Get all licenses from Firebase
  */
-const generateUUID = () => {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-};
-
-/**
- * Get all valid license hashes (Hardcoded + LocalStorage)
- */
-export const getStoredLicenses = (): LicenseEntry[] => {
-  if (typeof window === 'undefined') return [];
+export const fetchLicenses = async (): Promise<LicenseEntry[]> => {
   try {
-    const stored = localStorage.getItem('styleMimic_licenses');
-    let parsed: any[] = stored ? JSON.parse(stored) : [];
-    
-    // Auto-heal: Check for missing IDs (legacy data) and fix them immediately
-    let hasChanges = false;
-    const healed = parsed.map(item => {
-        if (!item.id) {
-            hasChanges = true;
-            return { ...item, id: generateUUID() };
-        }
-        return item;
+    const querySnapshot = await getDocs(collection(db, "licenses"));
+    const licenses: LicenseEntry[] = [];
+    querySnapshot.forEach((doc) => {
+      const data = doc.data();
+      licenses.push({
+        id: doc.id,
+        name: data.name,
+        hash: data.hash,
+        createdAt: data.createdAt
+      });
     });
-
-    if (hasChanges) {
-        localStorage.setItem('styleMimic_licenses', JSON.stringify(healed));
-    }
-
-    return healed as LicenseEntry[];
+    // Sort by newest first
+    return licenses.sort((a, b) => b.createdAt - a.createdAt);
   } catch (e) {
+    console.error("Error fetching licenses from Firebase:", e);
     return [];
   }
 };
 
-export const addLicense = (name: string, hash: string) => {
-  const current = getStoredLicenses();
-  const newEntry: LicenseEntry = {
-    id: generateUUID(),
-    name,
-    hash,
-    createdAt: Date.now()
-  };
-  localStorage.setItem('styleMimic_licenses', JSON.stringify([...current, newEntry]));
-  return newEntry;
-};
-
-export const removeLicense = (id: string) => {
-  const current = getStoredLicenses();
-  const updated = current.filter(l => l.id !== id);
-  localStorage.setItem('styleMimic_licenses', JSON.stringify(updated));
+/**
+ * ADD: Save new license to Firebase
+ */
+export const addLicense = async (name: string, hash: string): Promise<LicenseEntry | null> => {
+  try {
+    const newEntry = {
+      name,
+      hash,
+      createdAt: Date.now()
+    };
+    const docRef = await addDoc(collection(db, "licenses"), newEntry);
+    return { id: docRef.id, ...newEntry };
+  } catch (e) {
+    console.error("Error adding document: ", e);
+    alert("Failed to save to database. Check Firebase config.");
+    return null;
+  }
 };
 
 /**
- * Authenticates input against Admin and User lists
+ * REMOVE: Delete license from Firebase
+ */
+export const removeLicense = async (id: string) => {
+  try {
+    await deleteDoc(doc(db, "licenses", id));
+  } catch (e) {
+    console.error("Error deleting document: ", e);
+    alert("Failed to delete. Check Firebase permissions.");
+  }
+};
+
+/**
+ * AUTH: Check login against Firebase
  */
 export const authenticate = async (input: string): Promise<'admin' | 'user' | null> => {
   const normalizedInput = input.trim();
 
-  // 1. FALLBACK / EMERGENCY ACCESS: Check Plaintext first
-  // This guarantees you can access the app even if hashing fails on specific browsers/contexts
+  // 1. EMERGENCY FALLBACK (Always works)
   if (normalizedInput === "MASTER-ADMIN-2024") return 'admin';
   if (normalizedInput === "STYLE-VIP-2024") return 'user';
 
   try {
     const inputHash = await hashString(normalizedInput);
 
-    // 2. Check Admin Hash
-    if (inputHash === DEFAULT_ADMIN_HASH) {
-      return 'admin';
-    }
+    // 2. Check Admin Hash (Hardcoded)
+    if (inputHash === DEFAULT_ADMIN_HASH) return 'admin';
+    if (inputHash === DEFAULT_USER_HASH) return 'user';
 
-    // 3. Check Default User Hash
-    if (inputHash === DEFAULT_USER_HASH) {
+    // 3. Check Firebase Database
+    const q = query(collection(db, "licenses"), where("hash", "==", inputHash));
+    const querySnapshot = await getDocs(q);
+    
+    if (!querySnapshot.empty) {
       return 'user';
     }
 
-    // 4. Check Stored Licenses (LocalStorage)
-    const storedLicenses = getStoredLicenses();
-    const found = storedLicenses.find(l => l.hash === inputHash);
-    if (found) {
-      return 'user';
-    }
   } catch (e) {
-    console.error("Hashing failed, falling back to plaintext only checks", e);
-    // If hashing crashes, we rely solely on the plaintext check at step 1
+    console.error("Auth check failed:", e);
   }
 
   return null;

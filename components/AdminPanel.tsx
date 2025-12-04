@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Plus, Trash2, Key, LogOut, Check, Copy, AlertTriangle, Calendar } from 'lucide-react';
-import { getStoredLicenses, addLicense, removeLicense, hashString, LicenseEntry } from '../services/authService';
+import { Shield, Plus, Trash2, Key, LogOut, Check, AlertTriangle, Calendar, Loader2, Cloud } from 'lucide-react';
+import { fetchLicenses, addLicense, removeLicense, hashString, LicenseEntry } from '../services/authService';
 
 interface AdminPanelProps {
   onLogout: () => void;
@@ -10,36 +10,55 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
   const [licenses, setLicenses] = useState<LicenseEntry[]>([]);
   const [newLicenseName, setNewLicenseName] = useState('');
   const [newLicenseCode, setNewLicenseCode] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   
   // State to show the plaintext code one last time after creation
   const [lastCreated, setLastCreated] = useState<{name: string, code: string} | null>(null);
 
+  // Load licenses from Firebase on mount
   useEffect(() => {
-    // When component mounts, getStoredLicenses will auto-heal any legacy data
-    setLicenses(getStoredLicenses());
+    loadData();
   }, []);
+
+  const loadData = async () => {
+    setIsLoading(true);
+    const data = await fetchLicenses();
+    setLicenses(data);
+    setIsLoading(false);
+  };
 
   const handleAdd = async () => {
     if (!newLicenseName || !newLicenseCode) return;
+    setIsProcessing(true);
     
     const hash = await hashString(newLicenseCode);
-    addLicense(newLicenseName, hash);
     
-    setLicenses(getStoredLicenses());
+    // Save to Cloud
+    await addLicense(newLicenseName, hash);
     
-    // Show the success message with the plaintext code
+    // Reload data
+    await loadData();
+    
+    // Show success
     setLastCreated({ name: newLicenseName, code: newLicenseCode });
-    
-    // Clear inputs
     setNewLicenseName('');
     setNewLicenseCode('');
+    setIsProcessing(false);
   };
 
-  const handleDelete = (id: string) => {
-    // Removed window.confirm because it is often blocked in sandboxed environments (like the preview window),
-    // causing the delete action to fail silently.
+  const handleDelete = async (id: string) => {
+    // Optimistic Update (remove from UI immediately)
+    const oldLicenses = [...licenses];
     setLicenses(prev => prev.filter(l => l.id !== id));
-    removeLicense(id);
+    
+    try {
+        await removeLicense(id);
+    } catch (e) {
+        // Revert if failed
+        setLicenses(oldLicenses);
+        alert("Failed to delete from database");
+    }
   };
 
   const formatDate = (timestamp: number) => {
@@ -63,7 +82,10 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
             </div>
             <div>
               <h1 className="text-2xl font-bold">Admin Dashboard</h1>
-              <p className="text-sm text-gray-500">License Management System</p>
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <Cloud className="w-3 h-3" />
+                <span>Cloud Database Connected</span>
+              </div>
             </div>
           </div>
           <button 
@@ -76,9 +98,9 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {/* Create License */}
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 h-fit">
             <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-              <Plus className="w-5 h-5 text-neon-green" /> Issue New License
+              <Plus className="w-5 h-5 text-neon-green" /> Issue Cloud License
             </h2>
             
             <div className="space-y-4">
@@ -106,10 +128,11 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
               <button 
                 onClick={handleAdd}
-                disabled={!newLicenseName || !newLicenseCode}
-                className="w-full bg-neon-green hover:bg-green-500 text-black font-bold py-3 rounded-lg transition-all disabled:opacity-50"
+                disabled={!newLicenseName || !newLicenseCode || isProcessing}
+                className="w-full bg-neon-green hover:bg-green-500 text-black font-bold py-3 rounded-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                Create License
+                {isProcessing ? <Loader2 className="w-4 h-4 animate-spin"/> : null}
+                {isProcessing ? 'Saving to Cloud...' : 'Create License'}
               </button>
 
               {lastCreated && (
@@ -117,12 +140,12 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                   <div className="flex items-start gap-3">
                     <Check className="w-5 h-5 text-green-400 shrink-0 mt-0.5" />
                     <div className="flex-1">
-                        <p className="text-sm text-green-400 font-bold mb-1">LICENSE ISSUED SUCCESSFULLY!</p>
+                        <p className="text-sm text-green-400 font-bold mb-1">LICENSE SYNCED TO CLOUD!</p>
                         <p className="text-xs text-gray-400 mb-2">
-                            Please copy and send this code to the client immediately. 
+                            This license is now active on ALL devices.
                             <span className="text-red-400 block mt-1 font-bold">
                                 <AlertTriangle className="w-3 h-3 inline mr-1"/>
-                                For security, this code will NOT be shown again.
+                                Copy this code now. It is hidden forever after refresh.
                             </span>
                         </p>
                         <div className="bg-black/50 p-2 rounded border border-green-900/50 flex justify-between items-center">
@@ -148,14 +171,28 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
           {/* Active Licenses */}
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col h-full">
-             <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-              <Key className="w-5 h-5 text-neon-purple" /> Active Local Licenses
-            </h2>
+             <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                    <Key className="w-5 h-5 text-neon-purple" /> Active Cloud Licenses
+                </h2>
+                <button 
+                    onClick={loadData} 
+                    className="p-1 hover:bg-gray-800 rounded text-gray-400"
+                    title="Refresh Data"
+                >
+                    <Loader2 className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                </button>
+             </div>
             
-            <div className="space-y-3 flex-1 overflow-y-auto custom-scrollbar min-h-[200px] max-h-[400px]">
-              {licenses.length === 0 ? (
+            <div className="space-y-3 flex-1 overflow-y-auto custom-scrollbar min-h-[300px] max-h-[500px]">
+              {isLoading ? (
+                  <div className="text-center py-10 text-gray-500">
+                      <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2 opacity-50"/>
+                      Connecting to database...
+                  </div>
+              ) : licenses.length === 0 ? (
                 <p className="text-gray-500 text-sm italic text-center py-10 border border-dashed border-gray-800 rounded-lg">
-                    No local licenses issued yet.
+                    No cloud licenses found.
                 </p>
               ) : (
                 licenses.map((lic) => (
@@ -170,7 +207,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
                     <button 
                       onClick={() => handleDelete(lic.id)}
                       className="text-gray-600 hover:text-red-500 p-2 transition-colors rounded hover:bg-red-900/10"
-                      title="Revoke License"
+                      title="Revoke License from Cloud"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
