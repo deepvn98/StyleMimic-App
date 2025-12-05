@@ -199,6 +199,13 @@ export const generateScript = async (
       CRITICAL: You MUST cover the following locations in the script, weaving them together into a coherent journey:
       ${locs}
       
+      **STYLE ENFORCEMENT:**
+      - **DO NOT write like a generic travel brochure or Wikipedia.** 
+      - **YOU MUST USE THE PERSONA'S VOICE DEFINED ABOVE.** 
+      - If the persona is cynical, be cynical about the crowds. If they are poetic, be poetic about the light.
+      - Use the signature phrases and sentence structures identified in the analysis.
+      - Describe experiences through the specific lens of this persona.
+      
       Do not invent new locations. Focus on these specific spots.
       
       FORMATTING RULE:
