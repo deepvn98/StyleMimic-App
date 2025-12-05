@@ -13,14 +13,8 @@ const firebaseConfig = {
   measurementId: "G-YWPMPGXBXL"
 };
 
-// Initialize Firebase using the namespace import to avoid module resolution errors
-// wrapped in try-catch to prevent app crash if config is invalid
-let app;
-try {
-  app = initializeApp(firebaseConfig);
-} catch (e) {
-  console.error("Firebase initialization failed", e);
-}
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
 
 // Initialize Firestore (Database)
-export const db = app ? getFirestore(app) : null;
+export const db = getFirestore(app);

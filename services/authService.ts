@@ -29,7 +29,6 @@ export const hashString = async (input: string): Promise<string> => {
  * FETCH: Get all licenses from Firestore
  */
 export const fetchLicenses = async (): Promise<LicenseEntry[]> => {
-  if (!db) return [];
   try {
     const querySnapshot = await getDocs(collection(db, COLLECTION_NAME));
     const licenses: LicenseEntry[] = [];
@@ -54,7 +53,6 @@ export const fetchLicenses = async (): Promise<LicenseEntry[]> => {
  * ADD: Save new license to Firestore
  */
 export const addLicense = async (name: string, hash: string): Promise<LicenseEntry | null> => {
-  if (!db) return null;
   try {
     const newEntry = {
       name,
@@ -79,7 +77,6 @@ export const addLicense = async (name: string, hash: string): Promise<LicenseEnt
  * REMOVE: Delete license from Firestore
  */
 export const removeLicense = async (id: string) => {
-  if (!db) return;
   try {
     await deleteDoc(doc(db, COLLECTION_NAME, id));
   } catch (e) {
@@ -107,13 +104,11 @@ export const authenticate = async (input: string): Promise<'admin' | 'user' | nu
     if (inputHash === DEFAULT_USER_HASH) return 'user';
 
     // 3. Check Cloud Firestore
-    if (db) {
-        const q = query(collection(db, COLLECTION_NAME), where("hash", "==", inputHash));
-        const querySnapshot = await getDocs(q);
+    const q = query(collection(db, COLLECTION_NAME), where("hash", "==", inputHash));
+    const querySnapshot = await getDocs(q);
 
-        if (!querySnapshot.empty) {
-        return 'user';
-        }
+    if (!querySnapshot.empty) {
+      return 'user';
     }
 
   } catch (e) {

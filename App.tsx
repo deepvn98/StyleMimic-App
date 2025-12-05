@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, AlignLeft, Pencil, Check, Settings2, Folder, Key, Lock, LogIn, KeyRound } from 'lucide-react';
+import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, AlignLeft, Pencil, Check, Settings2, Folder, Key, Lock, LogIn } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { analyzeTranscript, generateScript, suggestTravelLocations } from './services/geminiService';
 import { authenticate } from './services/authService';
@@ -31,11 +31,18 @@ const App: React.FC = () => {
   // --- AUTH STATE ---
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [licenseKey, setLicenseKey] = useState('');
-  const [userApiKey, setUserApiKey] = useState(''); // Store user provided API Key
   const [authError, setAuthError] = useState('');
   const [isCheckingAuth, setIsCheckingAuth] = useState(false);
 
   // --- APP STATE ---
+  const [apiKey, setApiKey] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('styleMimic_apiKey') || '';
+    }
+    return '';
+  });
+  const [tempApiKey, setTempApiKey] = useState('');
+
   const [activeTab, setActiveTab] = useState<Tab>(Tab.ANALYZE);
   const [appState, setAppState] = useState<AppState>(AppState.LOCKED); // Start Locked
   
@@ -91,16 +98,9 @@ const App: React.FC = () => {
   // CHECK SESSION ON LOAD
   useEffect(() => {
     const session = sessionStorage.getItem('styleMimic_session');
-    const storedApiKey = sessionStorage.getItem('styleMimic_apiKey');
-    
     if (session === 'valid') {
       setIsAuthenticated(true);
-      if (storedApiKey) {
-        setUserApiKey(storedApiKey);
-        setAppState(AppState.IDLE);
-      } else {
-        setAppState(AppState.ENTER_API_KEY);
-      }
+      setAppState(AppState.IDLE);
     } else if (session === 'admin') {
       setIsAuthenticated(true);
       setAppState(AppState.ADMIN_DASHBOARD);
@@ -120,7 +120,6 @@ const App: React.FC = () => {
 
   // --- HANDLERS ---
 
-  // STEP 1: LOGIN (Check License)
   const handleLogin = async () => {
     if (!licenseKey.trim()) return;
     setIsCheckingAuth(true);
@@ -136,8 +135,7 @@ const App: React.FC = () => {
       } else if (role === 'user') {
         sessionStorage.setItem('styleMimic_session', 'valid');
         setIsAuthenticated(true);
-        // Go to Step 2: API Key Input
-        setAppState(AppState.ENTER_API_KEY);
+        setAppState(AppState.IDLE);
       } else {
         setAuthError('Invalid License Key');
       }
@@ -148,28 +146,24 @@ const App: React.FC = () => {
     }
   };
 
-  // STEP 2: SUBMIT API KEY
-  const handleApiKeySubmit = () => {
-    if (!userApiKey.trim()) {
-      setAuthError("Please enter a valid Google API Key");
-      return;
-    }
-    if (!userApiKey.startsWith("AIza")) {
-      setAuthError("Invalid API Key format (Must start with 'AIza')");
-      return;
-    }
-    
-    sessionStorage.setItem('styleMimic_apiKey', userApiKey);
-    setAppState(AppState.IDLE); // Go to App
-  };
-
   const handleLogout = () => {
     sessionStorage.removeItem('styleMimic_session');
-    sessionStorage.removeItem('styleMimic_apiKey');
     setIsAuthenticated(false);
     setAppState(AppState.LOCKED);
     setLicenseKey('');
-    setUserApiKey('');
+  };
+
+  const handleSaveApiKey = () => {
+    if (tempApiKey.trim()) {
+      localStorage.setItem('styleMimic_apiKey', tempApiKey.trim());
+      setApiKey(tempApiKey.trim());
+    }
+  };
+
+  const handleClearApiKey = () => {
+    localStorage.removeItem('styleMimic_apiKey');
+    setApiKey('');
+    setTempApiKey('');
   };
 
   const handleAddTranscript = () => {
@@ -205,17 +199,16 @@ const App: React.FC = () => {
     if (!combinedTranscript.trim()) return;
     setAppState(AppState.ANALYZING);
     try {
-      const profile = await analyzeTranscript(userApiKey, combinedTranscript);
+      const profile = await analyzeTranscript(combinedTranscript, apiKey);
       setCurrentProfile(profile);
       setActiveTab(Tab.GENERATE);
-    } catch (error: any) {
+    } catch (error) {
       console.error(error);
-      const msg = error?.message || "Unknown error";
-      alert(`Failed to analyze text.\nError details: ${msg}\n\nPlease check your API Key and try again.`);
+      alert("Failed to analyze text. Please check your API Key.");
     } finally {
       setAppState(AppState.IDLE);
     }
-  }, [transcripts, userApiKey]);
+  }, [transcripts, apiKey]);
 
   const handleLocationSearch = async (keepSelected: boolean = false) => {
     if (!topic.trim() || !currentProfile) return;
@@ -232,16 +225,15 @@ const App: React.FC = () => {
       }
 
       if (countNeeded > 0) {
-        const newLocations = await suggestTravelLocations(userApiKey, topic, currentProfile, countNeeded, excludeList);
+        const newLocations = await suggestTravelLocations(topic, currentProfile, countNeeded, excludeList, apiKey);
         setLocations([...currentSelection, ...newLocations]);
       } else {
          setLocations(currentSelection);
       }
       setShowLocationSelector(true);
-    } catch (error: any) {
+    } catch (error) {
       console.error(error);
-      const msg = error?.message || "Unknown error";
-      alert(`Failed to research locations.\nError details: ${msg}`);
+      alert("Failed to research locations. Check API Key.");
     } finally {
       setAppState(AppState.IDLE);
     }
@@ -259,19 +251,18 @@ const App: React.FC = () => {
     setAppState(AppState.GENERATING);
     setGeneratedScript('');
     try {
-      const script = await generateScript(userApiKey, topic, currentProfile, contentType, selectedLocs, targetLength);
+      const script = await generateScript(topic, currentProfile, contentType, selectedLocs, targetLength, apiKey);
       setGeneratedScript(script);
       if (contentType === 'travel') {
         setShowLocationSelector(false);
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error(error);
-      const msg = error?.message || "Unknown error";
-      alert(`Failed to generate script.\nError details: ${msg}`);
+      alert("Failed to generate script. Check API Key.");
     } finally {
       setAppState(AppState.IDLE);
     }
-  }, [topic, currentProfile, contentType, locations, targetLength, userApiKey]);
+  }, [topic, currentProfile, contentType, locations, targetLength, apiKey]);
 
   const handleCopyToClipboard = () => {
     if (!generatedScript) return;
@@ -419,7 +410,7 @@ const App: React.FC = () => {
     return <AdminPanel onLogout={handleLogout} />;
   }
 
-  // 2. LOCK SCREEN (LICENSE CHECK) - STEP 1
+  // 2. LOCK SCREEN (LICENSE CHECK)
   if (appState === AppState.LOCKED) {
     return (
       <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
@@ -484,79 +475,66 @@ const App: React.FC = () => {
     );
   }
 
-  // 3. API KEY INPUT - STEP 2
-  if (appState === AppState.ENTER_API_KEY) {
-     return (
-       <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6 font-sans relative overflow-hidden">
-         <div className="absolute inset-0 z-0 opacity-20">
-            <div className="absolute top-1/2 left-1/2 w-96 h-96 bg-neon-green rounded-full blur-[150px] -translate-x-1/2 -translate-y-1/2"></div>
-         </div>
- 
-         <div className="relative z-10 max-w-md w-full bg-gray-900/80 backdrop-blur border border-gray-800 rounded-2xl p-8 shadow-2xl animate-in zoom-in-95 duration-300">
-           <div className="flex items-center gap-3 mb-6 justify-center">
-              <div className="w-10 h-10 rounded bg-neon-green/20 border border-neon-green flex items-center justify-center">
-                 <KeyRound className="w-5 h-5 text-neon-green" />
+  // 3. API KEY SCREEN
+  if (!apiKey) {
+    return (
+      <div className="min-h-screen bg-gray-950 text-white flex flex-col items-center justify-center p-6 font-sans">
+         <button onClick={handleLogout} className="absolute top-6 right-6 text-gray-500 hover:text-white flex items-center gap-2">
+            <Lock className="w-4 h-4" /> Relock
+         </button>
+         <div className="max-w-md w-full bg-gray-900 border border-gray-800 rounded-2xl p-8 shadow-2xl">
+            <div className="flex items-center gap-3 mb-6 justify-center">
+              <div className="w-10 h-10 rounded bg-gradient-to-br from-neon-cyan to-neon-purple flex items-center justify-center">
+                <Brain className="w-6 h-6 text-white" />
               </div>
-              <h2 className="text-xl font-bold tracking-tight">API Setup</h2>
-           </div>
- 
-           <div className="space-y-6">
-              <div className="text-center">
-                <p className="text-gray-300 text-sm">
-                  This application requires your own Google Gemini API Key. 
-                  <br/>It is stored locally in your browser.
-                </p>
+              <h1 className="text-2xl font-bold tracking-tight">StyleMimic <span className="text-gray-500 font-normal">AI</span></h1>
+            </div>
+            
+            <p className="text-center text-gray-400 mb-8">
+              Welcome! To use StyleMimic AI, please enter your Google Gemini API Key. 
+              The key is stored locally in your browser and is never sent to our servers.
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="text-xs font-mono text-gray-500 mb-1 block uppercase">Google Gemini API Key</label>
+                <div className="relative">
+                  <Key className="absolute left-3 top-3 w-5 h-5 text-gray-600" />
+                  <input 
+                    type="password"
+                    value={tempApiKey}
+                    onChange={(e) => setTempApiKey(e.target.value)}
+                    className="w-full bg-gray-950 border border-gray-800 rounded-lg py-3 pl-10 pr-4 text-white focus:border-neon-cyan focus:outline-none"
+                    placeholder="AIzaSy..."
+                  />
+                </div>
+              </div>
+              
+              <button 
+                onClick={handleSaveApiKey}
+                disabled={!tempApiKey.trim()}
+                className="w-full bg-neon-cyan hover:bg-cyan-400 text-black font-bold py-3 rounded-lg transition-all disabled:opacity-50"
+              >
+                Start App
+              </button>
+
+              <div className="text-center pt-4">
                 <a 
                   href="https://aistudio.google.com/app/apikey" 
                   target="_blank" 
-                  rel="noreferrer"
-                  className="text-neon-cyan text-xs hover:underline mt-2 inline-block"
+                  rel="noopener noreferrer"
+                  className="text-xs text-neon-purple hover:underline"
                 >
-                  Get a free key here &rarr;
+                  Get a free API Key here
                 </a>
               </div>
- 
-              <div className="relative">
-                <input
-                  type="password"
-                  className={`block w-full px-4 py-3 border rounded-xl bg-gray-950 text-white placeholder-gray-600 focus:outline-none focus:ring-2 transition-all ${authError ? 'border-red-500 focus:ring-red-500' : 'border-gray-700 focus:border-neon-green focus:ring-neon-green/50'}`}
-                  placeholder="Paste your key here (AIza...)"
-                  value={userApiKey}
-                  onChange={(e) => {
-                    setUserApiKey(e.target.value);
-                    setAuthError('');
-                  }}
-                  onKeyDown={(e) => e.key === 'Enter' && handleApiKeySubmit()}
-                />
-              </div>
- 
-              {authError && (
-                <div className="bg-red-900/20 border border-red-900 text-red-400 text-sm p-3 rounded-lg text-center animate-in fade-in slide-in-from-top-1">
-                  {authError}
-                </div>
-              )}
- 
-              <button
-                onClick={handleApiKeySubmit}
-                disabled={!userApiKey.trim()}
-                className="w-full py-3 border border-transparent text-sm font-bold rounded-xl text-black bg-neon-green hover:bg-green-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Continue to App
-              </button>
-              
-              <button 
-                 onClick={handleLogout}
-                 className="w-full text-xs text-gray-500 hover:text-white"
-              >
-                 Back to License Screen
-              </button>
-           </div>
+            </div>
          </div>
-       </div>
-     );
+      </div>
+    );
   }
 
-  // 4. MAIN APPLICATION - STEP 3
+  // 4. MAIN APPLICATION
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans selection:bg-neon-cyan selection:text-black relative">
       {/* Header */}
@@ -591,6 +569,13 @@ const App: React.FC = () => {
               ))}
             </nav>
             <div className="h-6 w-px bg-gray-800 mx-2"></div>
+            <button 
+              onClick={handleClearApiKey}
+              className="text-gray-600 hover:text-neon-cyan transition-colors p-2"
+              title="Change API Key"
+            >
+              <Key className="w-4 h-4" />
+            </button>
             <button 
               onClick={handleLogout}
               className="text-gray-600 hover:text-red-400 transition-colors p-2"
