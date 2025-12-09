@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Plus, Trash2, Key, LogOut, Check, AlertTriangle, Calendar, Loader2, Cloud } from 'lucide-react';
+import { Shield, Plus, Trash2, Key, LogOut, Check, AlertTriangle, Calendar, Loader2, Cloud, LayoutGrid } from 'lucide-react';
 import { fetchLicenses, addLicense, removeLicense, hashString, LicenseEntry } from '../services/authService';
 
 interface AdminPanelProps {
   onLogout: () => void;
+  onGoToApp: () => void;
 }
 
-const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
+const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onGoToApp }) => {
   const [licenses, setLicenses] = useState<LicenseEntry[]>([]);
   const [newLicenseName, setNewLicenseName] = useState('');
   const [newLicenseCode, setNewLicenseCode] = useState('');
@@ -88,12 +89,21 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
               </div>
             </div>
           </div>
-          <button 
-            onClick={onLogout}
-            className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
-          >
-            <LogOut className="w-4 h-4" /> Sign Out
-          </button>
+          <div className="flex items-center gap-4">
+            <button 
+                onClick={onGoToApp}
+                className="flex items-center gap-2 text-gray-400 hover:text-neon-cyan transition-colors"
+            >
+                <LayoutGrid className="w-4 h-4" /> Go to App
+            </button>
+            <div className="w-px h-4 bg-gray-800"></div>
+            <button 
+                onClick={onLogout}
+                className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+            >
+                <LogOut className="w-4 h-4" /> Sign Out
+            </button>
+          </div>
         </header>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">

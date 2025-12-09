@@ -14,7 +14,9 @@ const firebaseConfig = {
 };
 
 // Initialize Firebase
-const app = firebaseApp.initializeApp(firebaseConfig);
+// Workaround for TypeScript error: Module '"firebase/app"' has no exported member 'initializeApp'
+// Casting to any allows accessing initializeApp from the namespace object which exists at runtime in standard builds
+const app = (firebaseApp as any).initializeApp(firebaseConfig);
 
 // Initialize Firestore (Database)
 export const db = getFirestore(app);

@@ -4,278 +4,580 @@ import { StyleProfile, StyleMetrics, ContentType, LocationSuggestion } from "../
 const ANALYSIS_MODEL = "gemini-2.5-flash";
 
 /**
- * Helper to get AI instance with dynamic key
+ * HELPER: Initialize AI client with a specific key
+ * Uses Vite environment variables if available, falls back to process.env
  */
 const getAiClient = (apiKey: string) => {
-  if (!apiKey) throw new Error("API Key is missing. Please enter your Google Gemini API Key.");
   return new GoogleGenAI({ apiKey });
+};
+
+/**
+ * EXECUTE WITH KEY ROTATION
+ * Wraps AI calls to automatically switch keys if one hits a rate limit (429).
+ * Reports status back via callback.
+ */
+const executeWithKeyRotation = async <T>(
+  apiKeys: string[], 
+  operation: (ai: GoogleGenAI) => Promise<T>,
+  onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
+): Promise<T> => {
+  // If no keys provided via argument, try environment variables
+  let keysToUse = apiKeys;
+  
+  if (!keysToUse || keysToUse.length === 0) {
+     const viteKey = (import.meta as any).env?.VITE_API_KEY;
+     // Safe check for process to avoid ReferenceError in browser
+     const processKey = (typeof process !== 'undefined' && process.env) ? process.env.API_KEY : undefined;
+     
+     const envKey = viteKey || processKey;
+     if (envKey) {
+        keysToUse = envKey.split(',').map((k: string) => k.trim());
+     }
+  }
+
+  if (!keysToUse || keysToUse.length === 0) {
+    throw new Error("No API Keys provided. Please add at least one Gemini API Key.");
+  }
+
+  let lastError: any = null;
+
+  // Try each key in the list
+  for (const apiKey of keysToUse) {
+    if (!apiKey.trim()) continue;
+    
+    try {
+      const ai = getAiClient(apiKey);
+      const result = await operation(ai);
+      
+      // If successful, mark this key as ACTIVE
+      if (onStatusUpdate) onStatusUpdate(apiKey, 'active');
+      
+      return result;
+    } catch (error: any) {
+      const msg = error.message || error.toString();
+      // If error is Rate Limit (429) or Quota, try next key
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+        console.warn(`Key ending in ...${apiKey.slice(-4)} exhausted. Rotating to next key.`);
+        
+        // Mark this key as EXPIRED
+        if (onStatusUpdate) onStatusUpdate(apiKey, 'expired');
+        
+        lastError = error;
+        continue; // Loop to next key
+      } else {
+        // If it's a different error (e.g., Bad Request), throw immediately
+        throw error;
+      }
+    }
+  }
+
+  // If we ran out of keys
+  throw lastError || new Error("All provided API Keys have exhausted their quota.");
 };
 
 /**
  * Analyzes a transcript to extract a style profile.
  */
-export const analyzeTranscript = async (transcript: string, apiKey: string): Promise<StyleProfile> => {
-  const ai = getAiClient(apiKey);
-  
-  const responseSchema = {
-    type: Type.OBJECT,
-    properties: {
-      metrics: {
-        type: Type.OBJECT,
-        properties: {
-          humor: { type: Type.NUMBER, description: "Level of humor 0-100" },
-          logic: { type: Type.NUMBER, description: "Level of logical reasoning 0-100" },
-          emotion: { type: Type.NUMBER, description: "Level of emotional appeal 0-100" },
-          complexity: { type: Type.NUMBER, description: "Vocabulary complexity 0-100" },
-          pacing: { type: Type.NUMBER, description: "Perceived speed/energy 0-100" },
-          informality: { type: Type.NUMBER, description: "Casualness 0-100" },
-        },
-        required: ["humor", "logic", "emotion", "complexity", "pacing", "informality"],
-      },
-      signaturePhrases: {
-        type: Type.ARRAY,
-        items: { type: Type.STRING },
-        description: "5-10 unique phrases, catchphrases, or verbal tics used strictly by this speaker.",
-      },
-      toneDescription: {
-        type: Type.STRING,
-        description: "EXTREMELY DETAILED forensic linguistic analysis of the tone. Include nuances, rhetorical devices, shifting attitudes, and specific quirks. Do not be vague.",
-      },
-      structurePattern: {
-        type: Type.STRING,
-        description: "EXTREMELY DETAILED forensic analysis of the 'Internal Logic Flow' and 'Paragraph Architecture'. Does the speaker think linearly or in loops? Do they go on tangents? Do they interrupt themselves (Self-interruptions)? Do they use rhetorical questions? Analyze how they move from one thought to another (smooth vs. abrupt).",
-      },
-      typicalSectionLength: {
-        type: Type.NUMBER,
-        description: "Calculate the average number of words the speaker uses to cover a single sub-topic or location before moving to the next. Approx integer.",
-      },
-      name: {
-        type: Type.STRING,
-        description: "A creative name for this style persona (e.g., 'The Tech Skeptic').",
-      },
-      description: {
-        type: Type.STRING,
-        description: "Short tagline for the persona.",
-      },
-    },
-    required: ["metrics", "signaturePhrases", "toneDescription", "structurePattern", "typicalSectionLength", "name", "description"],
-  };
+export const analyzeTranscript = async (
+    apiKeys: string[], 
+    transcript: string,
+    onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
+): Promise<StyleProfile> => {
+    return executeWithKeyRotation(apiKeys, async (ai) => {
+        const responseSchema = {
+          type: Type.OBJECT,
+          properties: {
+            metrics: {
+              type: Type.OBJECT,
+              properties: {
+                humor: { type: Type.NUMBER, description: "Level of humor 0-100" },
+                logic: { type: Type.NUMBER, description: "Level of logical reasoning 0-100" },
+                emotion: { type: Type.NUMBER, description: "Level of emotional appeal 0-100" },
+                complexity: { type: Type.NUMBER, description: "Vocabulary complexity 0-100" },
+                pacing: { type: Type.NUMBER, description: "Perceived speed/energy 0-100" },
+                informality: { type: Type.NUMBER, description: "Casualness 0-100" },
+              },
+              required: ["humor", "logic", "emotion", "complexity", "pacing", "informality"],
+            },
+            signaturePhrases: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "5-10 unique phrases, catchphrases, or verbal tics used strictly by this speaker.",
+            },
+            styleSamples: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "Extract 3 to 5 VERBATIM paragraphs from the transcript that are 'Stylistically Dense'. Choose samples that show the strongest personality, imperfections, or unique thinking patterns. Do NOT choose generic intros/outros.",
+            },
+            toneDescription: {
+              type: Type.STRING,
+              description: "Summary of tone.",
+            },
+            structurePattern: {
+              type: Type.STRING,
+              description: "General description of the structure (Linear, Looping, Tangential).",
+            },
+            structuralBlueprint: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: "Legacy simplified blueprint. Just list the main steps.",
+            },
+            quantitativeAnalysis: {
+                type: Type.OBJECT,
+                description: "Detailed breakdown of the physical structure of the text.",
+                properties: {
+                    totalWordCount: { type: Type.NUMBER, description: "Total words in the analyzed sample." },
+                    paragraphCount: { type: Type.NUMBER, description: "Total paragraphs." },
+                    averageWordsPerParagraph: { type: Type.NUMBER, description: "Average words per paragraph." },
+                    sentenceCount: { type: Type.NUMBER, description: "Total sentences." },
+                    subHeaderStyle: { type: Type.STRING, description: "How do they name sections? (e.g. 'Short & Punchy', 'Questions', 'Descriptive', 'None')." },
+                    structureSkeleton: {
+                        type: Type.ARRAY,
+                        description: "A detailed map of the content flow with estimated word counts for each section.",
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                sectionName: { type: Type.STRING, description: "e.g. 'Opening Hook', 'Main Argument', 'Data Analysis', 'Conclusion'" },
+                                estimatedWords: { type: Type.NUMBER, description: "Approximate word count for this specific section." },
+                                purpose: { type: Type.STRING, description: "The rhetorical goal of this section." }
+                            },
+                            required: ["sectionName", "estimatedWords", "purpose"]
+                        }
+                    }
+                },
+                required: ["totalWordCount", "paragraphCount", "averageWordsPerParagraph", "sentenceCount", "subHeaderStyle", "structureSkeleton"]
+            },
+            structuralPatterns: {
+                type: Type.OBJECT,
+                description: "Specific habitual patterns for Intros, Transitions, and Outros.",
+                properties: {
+                    introHabits: { type: Type.STRING, description: "How do they usually start? (e.g., 'Rhetorical Question', 'Anecdote', 'Standard Greeting')." },
+                    introPhrases: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Specific VERBATIM phrases used at the start (e.g. 'What is up guys', 'Let's dive in')." },
+                    transitionPhrases: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Phrases used to bridge topics (e.g. 'But here is the thing', 'Moving on')." },
+                    outroHabits: { type: Type.STRING, description: "How do they end? (e.g., 'Call to Action', 'Summary', 'Abrupt stop')." },
+                    outroPhrases: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Specific VERBATIM phrases used at the end (e.g. 'Peace out', 'Thanks for watching')." },
+                },
+                required: ["introHabits", "introPhrases", "transitionPhrases", "outroHabits", "outroPhrases"]
+            },
+            styleDNA: {
+              type: Type.OBJECT,
+              properties: {
+                   lexicalSignature: { type: Type.STRING, description: "Vocabulary habits, preferred word types (verbs vs adjectives), jargon usage." },
+                   syntaxPattern: { type: Type.STRING, description: "Sentence structure preference (short/long, complex/simple, questions/statements)." },
+                   rhetoricalDevices: { type: Type.STRING, description: "Use of metaphors, irony, repetition, rhetorical questions." },
+                   cognitivePattern: { type: Type.STRING, description: "Thinking style: Linear vs Looping? Logical vs Emotional? Inductive vs Deductive?" },
+                   narrativeStyle: { type: Type.STRING, description: "How they tell stories: Anecdotal? Data-driven? Hero's journey?" },
+                   emotionalCurve: { type: Type.STRING, description: "How they build emotion: Slow burn? High energy peaks? Flat?" },
+                   verbalTics: { type: Type.STRING, description: "Specific speech disfluencies, crutch words (like, um, you know, actually), stuttering patterns, or grammatical irregularities." }
+              },
+              required: ["lexicalSignature", "syntaxPattern", "rhetoricalDevices", "cognitivePattern", "narrativeStyle", "emotionalCurve", "verbalTics"]
+            },
+            typicalSectionLength: {
+              type: Type.NUMBER,
+              description: "Calculate the average number of words the speaker uses to cover a single sub-topic or location before moving to the next. Approx integer.",
+            },
+            name: {
+              type: Type.STRING,
+              description: "A creative name for this style persona (e.g., 'The Tech Skeptic').",
+            },
+            description: {
+              type: Type.STRING,
+              description: "Short tagline for the persona.",
+            },
+          },
+          required: ["metrics", "signaturePhrases", "styleSamples", "toneDescription", "structurePattern", "structuralBlueprint", "quantitativeAnalysis", "structuralPatterns", "styleDNA", "typicalSectionLength", "name", "description"],
+        };
+      
+        const response = await ai.models.generateContent({
+          model: ANALYSIS_MODEL,
+          contents: `You are a Forensic Computational Linguist specialized in Stylometry and Quantitative Discourse Analysis. 
+          Your task is to extract a "Digital Clone" of the speaker's writing style.
+          
+          Ignore the specific topic (what they say).
+          Focus entirely on the FORM (how they say it) and the PHYSICAL STRUCTURE (length, density).
+      
+          Analyze the provided transcripts to populate the schema. 
+          
+          CRITICAL INSTRUCTION FOR STRUCTURAL PATTERNS (ANCHORING):
+          - **Analyze the very first 2 sentences** of every sample. What are the commonalities? Extract the EXACT words they use to open.
+          - **Analyze the transition points.** How do they move from the intro to the body?
+          - **Analyze the very last 2 sentences.** Do they have a sign-off signature? (e.g. "Cheers", "Peace", "See ya").
+          
+          CRITICAL INSTRUCTION FOR QUANTITATIVE ANALYSIS:
+          - **Count words & paragraphs** accurately.
+          - **Reverse Engineer the Skeleton:** Break down the text into functional blocks (Intro, Body 1, Body 2, Conclusion).
+          - **Estimate Word Counts per Block:** How many words do they spend on the Intro vs the Body? This is crucial for pacing.
+          - **Analyze Subheaders:** Do they use them? If so, what style? (e.g., "The Problem", "Step 1", "Why I Quit", or no headers).
+          
+          CRITICAL INSTRUCTION FOR DNA EXTRACTION:
+          - Use concepts from **Rhetorical Structure Theory (RST)** and **Discourse Parsing**.
+          - Analyze **Prosody & Flow**: Even in text, find the rhythm of speech.
+          - Analyze **Cognitive Style**: Is the speaker abstract or concrete?
+          
+          **CRITICAL: ANALYZE IMPERFECTIONS & VERBAL TICS (THE "HUMAN" ELEMENT)**
+          - AI models write perfectly. Humans do not.
+          - Identify the specific ways this speaker breaks grammar rules.
+          - Do they run sentences together?
+          - Do they use crutch words like "basically", "literally", "kind of", "you know"?
+          - Do they start sentences with "And", "But", "So"?
+          - Do they use abrupt transitions?
+          - **Record these flaws minutely. They are essential for the clone.**
 
-  const response = await ai.models.generateContent({
-    model: ANALYSIS_MODEL,
-    contents: `You are a Forensic Computational Linguist. Your task is to extract a "Digital Clone" of the speaker's writing style.
-    
-    Ignore the specific topic (what they say).
-    Focus entirely on the FORM (how they say it).
-
-    Analyze the provided transcripts to populate the schema. 
-    
-    CRITICAL INSTRUCTION FOR TONE & STRUCTURE:
-    - Do not write generic summaries like "They are funny."
-    - Write deep, forensic observations like: "Uses short staccato sentences to build tension, then releases it with a self-deprecating joke. Often starts paragraphs with conjunctions (But, And, So)."
-    - **Focus on the 'Body Flow': Does the speaker argue with themselves? Do they digress? Capture the 'Controlled Chaos'.**
-    - Keep as much detail as possible.
-
-    CRITICAL INSTRUCTION FOR LENGTH:
-    - Estimate the 'Word Count Density'. When describing a specific thing (like a hotel, a phone feature, or a news event), how many words do they typically spend on it?
-
-    Transcript:
-    """
-    ${transcript.substring(0, 50000)}
-    """`, 
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: responseSchema,
-      temperature: 0, // CRITICAL: Ensure deterministic results
-    },
-  });
-
-  if (!response.text) {
-    throw new Error("No response from Gemini");
-  }
-
-  const data = JSON.parse(response.text);
-  
-  return {
-    id: crypto.randomUUID(),
-    contentType: 'general', // Default folder
-    ...data
-  };
+          **STYLE SAMPLES SELECTION:**
+          - Select 3-5 paragraphs that define this person.
+          - Look for "Peaks of Personality".
+          
+          Transcript:
+          """
+          ${transcript.substring(0, 50000)}
+          """`, 
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: responseSchema,
+            temperature: 0, 
+            thinkingConfig: { thinkingBudget: 2048 } // Allow some thinking for analysis to ensure deep extraction
+          },
+        });
+      
+        if (!response.text) {
+          throw new Error("No response from Gemini");
+        }
+      
+        const data = JSON.parse(response.text);
+        
+        return {
+          id: crypto.randomUUID(),
+          contentType: 'general', // Default folder
+          ...data
+        };
+    }, onStatusUpdate);
 };
 
 /**
- * Suggests travel locations using Google Search grounding.
+ * Suggests travel locations.
  */
 export const suggestTravelLocations = async (
+  apiKeys: string[],
   topic: string, 
   profile: StyleProfile, 
   count: number,
   excludeNames: string[] = [],
-  apiKey: string
+  onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
 ): Promise<LocationSuggestion[]> => {
-  const ai = getAiClient(apiKey);
-  
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: `
-      Topic: ${topic}
-      Persona Context: ${profile.name} (${profile.description})
+    return executeWithKeyRotation(apiKeys, async (ai) => {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `
+            Topic: ${topic}
+            Persona Context: ${profile.name} (${profile.description})
+            
+            Task: suggest exactly ${count} unique, real-world locations that fit the topic and would appeal to this persona.
+            Critically important: Do NOT include these locations: ${excludeNames.join(", ")}.
+            
+            Ensure these places exist and are highly rated by travelers.
+            For each location, provide a name and a very brief reason why it's interesting.
+          `,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                locations: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      name: { type: Type.STRING },
+                      description: { type: Type.STRING },
+                    },
+                    required: ["name", "description"],
+                  },
+                },
+              },
+              required: ["locations"],
+            },
+          },
+        });
       
-      Task: suggest exactly ${count} unique, real-world locations that fit the topic and would appeal to this persona.
-      Critically important: Do NOT include these locations: ${excludeNames.join(", ")}.
+        if (!response.text) throw new Error("Failed to fetch locations");
       
-      Use Google Search to ensure these places exist, are currently open, and are highly rated by travelers.
-      For each location, provide a name and a very brief reason why it's interesting.
-
-      OUTPUT FORMAT:
-      You must return the result as a valid JSON object with the following structure:
-      {
-        "locations": [
-          {
-            "name": "Name of the location",
-            "description": "1 sentence description"
-          }
-        ]
-      }
-      Do not include any other text outside the JSON.
-    `,
-    config: {
-      tools: [{ googleSearch: {} }],
-    }
-  });
-
-  if (!response.text) throw new Error("Failed to fetch locations");
-
-  // Clean up Potential Markdown formatting (```json ... ```)
-  let cleanedText = response.text.trim();
-  if (cleanedText.startsWith("```")) {
-    cleanedText = cleanedText.replace(/^```(json)?\n?/, "").replace(/\n?```$/, "");
-  }
-
-  try {
-    const data = JSON.parse(cleanedText);
-    return data.locations.map((loc: any) => ({
-      id: crypto.randomUUID(),
-      name: loc.name,
-      description: loc.description,
-      isSelected: false
-    }));
-  } catch (e) {
-    console.error("JSON Parse Error:", e);
-    console.log("Raw Text:", response.text);
-    throw new Error("Failed to parse location suggestions.");
-  }
+        let cleanedText = response.text.trim();
+        if (cleanedText.startsWith("```")) {
+          cleanedText = cleanedText.replace(/^```(json)?\n?/, "").replace(/\n?```$/, "");
+        }
+      
+        try {
+          const data = JSON.parse(cleanedText);
+          return data.locations.map((loc: any) => ({
+            id: crypto.randomUUID(),
+            name: loc.name,
+            description: loc.description,
+            isSelected: false
+          }));
+        } catch (e) {
+          console.error("JSON Parse Error:", e);
+          throw new Error("Failed to parse location suggestions.");
+        }
+    }, onStatusUpdate);
 };
 
 const CONTENT_TYPE_INSTRUCTIONS: Record<ContentType, string> = {
   general: "Structure the script in a standard conversational format relevant to the topic.",
-  travel: "Structure: Travel Vlog/Guide. Use the Location Name as a Header for each section. Focus on sensory details (sights, sounds, smells), immersion, and practical advice. Use a 'Journey' arc: Hook -> Arrival/Impression -> Activity/Food -> Practical Tip -> Outro.",
-  news: "Structure: News Report. Use the 'Inverted Pyramid' style. Start with the most critical facts (Who, what, where, when). Maintain a sense of urgency but objectivity, even if the persona is informal. Use clear transitions between segments.",
-  tech: "Structure: Product/Tech Review. Start with the verdict or hook. Break down into: Design, Specs, Real-world Usage, Pros/Cons, and Final Recommendation.",
-  story: "Structure: Narrative Storytelling. Focus on character arch, conflict, and resolution. Use strong imagery and pacing.",
-  educational: "Structure: Tutorial/Educational. Step-by-step logic. Clear introduction of what will be learned, followed by the 'How-to', and a summary recap."
+  travel: "Format: RAW STYLE MIMICRY. Strictly adhere to the persona's voice and structure. No generic 'Documentary' style unless the persona naturally matches it.",
+  news: "Structure: News Report. Use the 'Inverted Pyramid' style.",
+  tech: "Structure: Product/Tech Review.",
+  story: "Structure: Narrative Storytelling.",
+  educational: "Structure: Tutorial/Educational."
+};
+
+/**
+ * Helper to generate PROMPT TUNING instructions based on quantitative metrics.
+ * This converts numbers (0-100) into linguistic instructions.
+ */
+const getMetricTuningInstructions = (metrics: StyleMetrics): string[] => {
+    const tuning = [];
+
+    // Humor Tuning (Granular)
+    if (metrics.humor >= 80) {
+        tuning.push("MODE: COMEDY CLUB. Aggressively use satire, irony, and self-deprecation. Do not take the topic seriously.");
+    } else if (metrics.humor >= 60) {
+        tuning.push("MODE: WITTY. Lighten the mood with occasional clever remarks or playful metaphors.");
+    } else if (metrics.humor <= 20) {
+        tuning.push("MODE: SERIOUS. Zero tolerance for jokes. Tone must be grave, professional, or strictly factual.");
+    }
+
+    // Logic vs Emotion
+    if (metrics.logic >= 80) {
+        tuning.push("COGNITIVE STYLE: ANALYTICAL. Structure arguments with 'Premise -> Evidence -> Conclusion'. Use connectors like 'However', 'Therefore', 'Conversely'.");
+    } 
+    if (metrics.emotion >= 80) {
+        tuning.push("COGNITIVE STYLE: VISCERAL. Focus on sensory experience (sight, sound, feeling). Use emotionally charged adjectives. Appeal to the reader's empathy.");
+    }
+
+    // Complexity
+    if (metrics.complexity >= 80) {
+        tuning.push("VOCABULARY: ACADEMIC/TECHNICAL. Use precise, high-level terminology. Do not simplify concepts. Assume the reader is an expert.");
+    } else if (metrics.complexity <= 30) {
+        tuning.push("VOCABULARY: ELI5. Use simple words. Short sentences. No jargon. Metaphors from daily life.");
+    }
+
+    // Pacing
+    if (metrics.pacing >= 80) {
+        tuning.push("RHYTHM: STACCATO. Fast. Urgent. Short sentences. Fragments. Keep the reader breathless.");
+    } else if (metrics.pacing <= 30) {
+        tuning.push("RHYTHM: LEGATO. Flowing, meditative, and slow. Long, compound-complex sentences that drift between ideas.");
+    }
+
+    // Informality
+    if (metrics.informality >= 80) {
+        tuning.push("REGISTER: RAW/STREET. Slang allowed. Grammar rules are optional. Write exactly how a close friend speaks in a bar.");
+    } else if (metrics.informality <= 20) {
+        tuning.push("REGISTER: HIGH FORMAL. Adhere strictly to grammar. No contractions (cannot, do not). Passive voice is acceptable where appropriate.");
+    }
+
+    return tuning;
 };
 
 /**
  * Generates a new script based on a specific style profile.
+ * UPDATED: Uses System Instructions and Negative Constraints for better mimicry.
  */
 export const generateScript = async (
+  apiKeys: string[],
   topic: string, 
   profile: StyleProfile, 
   contentType: ContentType = 'general',
   selectedLocations: LocationSuggestion[] = [],
-  targetLength: number = 250, // Default fallback
-  apiKey: string
+  targetLength: number = 250,
+  creativityLevel: number = 1.35, // NEW: Temperature control
+  onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
 ): Promise<string> => {
-  const ai = getAiClient(apiKey);
-  const formatInstruction = CONTENT_TYPE_INSTRUCTIONS[contentType];
-  
-  let contentSpecificPrompt = `TASK: Write a script for the topic: "${topic}"`;
-  
-  if (contentType === 'travel' && selectedLocations.length > 0) {
-    const locs = selectedLocations.map(l => `- ${l.name}: ${l.description}`).join('\n');
-    contentSpecificPrompt = `
-      TASK: Write a Travel Vlog script about "${topic}".
-      CRITICAL: You MUST cover the following locations in the script, weaving them together into a coherent journey:
-      ${locs}
-      
-      **STYLE ENFORCEMENT:**
-      - **DO NOT write like a generic travel brochure or Wikipedia.** 
-      - **YOU MUST USE THE PERSONA'S VOICE DEFINED ABOVE.** 
-      - If the persona is cynical, be cynical about the crowds. If they are poetic, be poetic about the light.
-      - Use the signature phrases and sentence structures identified in the analysis.
-      - Describe experiences through the specific lens of this persona.
-      
-      Do not invent new locations. Focus on these specific spots.
-      
-      FORMATTING RULE:
-      - Use the specific Name of the Location as the Header (Markdown ##) for that section. 
-      - Example:
-        ## Eifel Tower
-        [Content...]
+    return executeWithKeyRotation(apiKeys, async (ai) => {
+        const formatInstruction = CONTENT_TYPE_INSTRUCTIONS[contentType];
         
-        ## Louvre Museum
-        [Content...]
+        // --- 1. STYLE CONDITIONING (SAMPLES) ---
+        // We use samples to 'prime' the model's style vector.
+        const samplesBlock = profile.styleSamples && profile.styleSamples.length > 0
+          ? `
+          ### STYLE CONDITIONING (THE SOURCE OF TRUTH) ###
+          You are a method actor. Your entire personality is defined by these samples.
+          Mimic the sentence length, the vocabulary choice, and the specific "flavor" of the text below.
+          
+          ${profile.styleSamples.map((s, i) => `--- STYLE SAMPLE ${i+1} ---\n${s}`).join('\n')}
+          `
+          : "";
 
-      VOLUME CONSTRAINT: For EACH location listed above, you MUST write between ${targetLength} and ${targetLength + 50} words.
-      This is a strict requirement. Provide deep, immersive details for every single spot to hit this word count range.
-    `;
-  } else {
-    // For general content, targetLength applies to the WHOLE script
-    contentSpecificPrompt += `\nVOLUME CONSTRAINT: The TOTAL script length should be approximately ${targetLength} words. 
-    Adjust the depth of each section to meet this total volume requirement while maintaining the author's pacing.
-    
-    CRITICAL STRUCTURE INSTRUCTION (ANTI-SMOOTHING):
-    - Do NOT default to a standard 'Intro -> Point 1 -> Point 2 -> Conclusion' essay structure unless the persona actually does that.
-    - If the analysis mentions "tangents", "self-interruptions", or "looping logic", YOU MUST REPLICATE IT.
-    - MIMIC "CONTROLLED CHAOS": Allow the script to meander, double back, or abruptly change direction if that fits the style.
-    - The goal is a "Mental Clone", not a polished article. If they argue with themselves, do it. If they leave sentences unfinished, do it.
-    `;
-  }
+        // --- 2. STRUCTURAL TUNING (SKELETON) ---
+        let blueprintBlock = "";
+        
+        if (profile.quantitativeAnalysis && profile.quantitativeAnalysis.structureSkeleton) {
+             const originalTotal = profile.quantitativeAnalysis.totalWordCount || 1000;
+             const scaleFactor = targetLength / originalTotal;
+             
+             const scaledSkeleton = profile.quantitativeAnalysis.structureSkeleton.map(sec => ({
+                 name: sec.sectionName,
+                 purpose: sec.purpose,
+                 targetWords: Math.max(15, Math.round(sec.estimatedWords * scaleFactor)) 
+             }));
 
-  const systemPrompt = `
-    You are a professional scriptwriter capable of perfect mimicry. 
-    You must adopt the following persona strictly:
-    
-    NAME: ${profile.name}
-    
-    FORENSIC TONE ANALYSIS (You must act this out): 
-    ${profile.toneDescription}
-    
-    STRUCTURAL DNA (You must build sentences like this): 
-    ${profile.structurePattern}
-    
-    METRICS (0-100):
-    - Humor: ${profile.metrics.humor}
-    - Logic: ${profile.metrics.logic}
-    - Emotion: ${profile.metrics.emotion}
-    - Complexity: ${profile.metrics.complexity}
-    - Pacing: ${profile.metrics.pacing}
-    - Informality: ${profile.metrics.informality}
-    
-    SIGNATURE PHRASES (Use sparingly but effectively):
-    ${profile.signaturePhrases.join(", ")}
-    
-    ${contentSpecificPrompt}
-    
-    FORMAT REQUIREMENT (${contentType.toUpperCase()}):
-    ${formatInstruction}
+             blueprintBlock = `
+             ### STRUCTURAL BLUEPRINT (NON-NEGOTIABLE) ###
+             Follow this narrative arc exactly.
+             
+             ${scaledSkeleton.map((sec, i) => 
+                `[SECTION ${i+1}] "${sec.name}" (~${sec.targetWords} words)
+                 -> GOAL: ${sec.purpose}`
+             ).join('\n')}
+             
+             **Formatting:** Use '${profile.quantitativeAnalysis.subHeaderStyle}' style headers.
+             `;
+        }
 
-    INSTRUCTIONS:
-    1. Adopt the persona's voice (metrics, tone, structure) completely.
-    2. Do NOT mention that you are an AI or that you are mimicking someone.
-    3. Output ONLY the script content (Markdown formatted).
-    4. Ensure the output length matches the constraints provided.
-  `;
+        // --- 3. PROMPT TUNING (METRICS -> INSTRUCTIONS) ---
+        // Convert abstract numbers into concrete writing rules
+        const tuningInstructions = getMetricTuningInstructions(profile.metrics);
+        const tuningBlock = tuningInstructions.length > 0 
+            ? `### PROMPT TUNING (NON-NEGOTIABLE RULES) ###\n${tuningInstructions.map(t => `- ${t}`).join('\n')}`
+            : "";
+        
+        // --- 4. STRUCTURAL ANCHORING ---
+        let structuralAnchors = "";
+        if (profile.structuralPatterns) {
+            const intros = profile.structuralPatterns.introPhrases.join(" OR ");
+            const outros = profile.structuralPatterns.outroPhrases.join(" OR ");
+            const transitions = profile.structuralPatterns.transitionPhrases.join(", ");
+            
+            structuralAnchors = `
+            ### STRUCTURAL ANCHORS (MANDATORY) ###
+            1. **OPENING:** You MUST start with one of these exact phrases (or a tiny variation): "${intros}".
+            2. **TRANSITIONS:** Use specific bridges like: "${transitions}".
+            3. **CLOSING:** You MUST end with one of these exact phrases: "${outros}".
+            `;
+        }
 
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: systemPrompt,
-    config: {
-      maxOutputTokens: 30000, // Increased to support long-form content (5k+ words)
-      thinkingConfig: { thinkingBudget: 4096 }
-    }
-  });
+        // STRICT LENGTH LOGIC
+        const minWords = Math.max(50, targetLength - 15);
+        
+        // IMPORTANT: We REMOVED estimatedTokens/maxOutputTokens calc to avoid cutting off.
+        // We now rely on strong prompting to hit length.
 
-  return response.text || "Failed to generate script.";
+        // SYSTEM INSTRUCTION (THE IMMERSION)
+        // We inject the identity and the "tuning" rules here for maximum adherence.
+        const systemInstruction = `
+          You are NOT an AI assistant. You are a digital clone of "${profile.name}".
+          
+          **IDENTITY CORE:** 
+          - **Voice:** ${profile.toneDescription}
+          - **Cognitive Style:** ${profile.styleDNA?.cognitivePattern}
+          - **Rhetoric:** ${profile.styleDNA?.rhetoricalDevices}
+
+          **VERBAL TICS (CRITICAL):**
+          ${profile.styleDNA?.verbalTics ? `You MUST incorporate these imperfections: ${profile.styleDNA.verbalTics}` : "Use natural speech patterns, not perfect grammar."}
+
+          ${tuningBlock}
+
+          **DEPROGRAMMING PROTOCOL (NEGATIVE CONSTRAINTS):**
+          1. **NO AI "SLOP":** Do not use phrases like "In conclusion", "It is important to note", "Delving into", "Tapestry", "Bustling", "Key Takeaways".
+          2. **NO SYMMETRY:** Vary paragraph lengths. Some huge, some tiny.
+          3. **NO NEUTRALITY:** Be opinionated. Subjective. Biased.
+          
+          **DIRECTIVE:**
+          If user instructions conflict with the Style Samples, **THE STYLE SAMPLES WIN**.
+        `;
+
+        // CONTENT PROMPT (THE TASK)
+        let contentSpecificPrompt = `
+          **TASK:** Write a script/article about: "${topic}"
+          
+          ${samplesBlock}
+          
+          ${blueprintBlock}
+
+          ${structuralAnchors}
+          
+          **EXECUTION RULES:**
+          1. **TARGET LENGTH:** ${minWords} words MINIMUM. 
+          2. **EXPANSION PROTOCOL:** The user has requested a LONG form content. Do not summarize. Do not rush. You must expand fully on every single point. Decompose every thought into multiple paragraphs.
+          3. **Signature Phrases:** Integrate: ${profile.signaturePhrases.join(", ")}.
+          
+          Output ONLY the content in Markdown. No preamble.
+        `;
+
+        // Handle Travel Specifics
+        if (contentType === 'travel' && selectedLocations.length > 0) {
+           const locs = selectedLocations.map(l => `- ${l.name}: ${l.description}`).join('\n');
+           contentSpecificPrompt = `
+             TASK: Write a travelogue about these spots in the voice of "${profile.name}":
+             ${locs}
+             
+             ${samplesBlock}
+             ${blueprintBlock}
+             ${structuralAnchors}
+             
+             **STRICT MIMICRY RULES:**
+             - **No Tour Guide Voice:** Do not sound like Wikipedia. Sound like the persona visiting these places.
+             - **Word Count:** ~${Math.round(targetLength / selectedLocations.length)} words per location.
+             - **Expansion:** Describe sights, smells, and feelings in detail to meet the word count.
+           `;
+        }
+      
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: contentSpecificPrompt,
+          config: {
+            systemInstruction: systemInstruction,
+            // REMOVED maxOutputTokens to prevent abrupt cut-offs.
+            temperature: creativityLevel, // Dynamic Temperature
+            thinkingConfig: { 
+                thinkingBudget: 4096 // Max thinking for style planning
+            }
+          }
+        });
+      
+        return response.text || "Failed to generate script.";
+    }, onStatusUpdate);
+};
+
+/**
+ * REFINEMENT TOOL: Rewrites a specific chunk of text to be closer to the persona.
+ */
+export const refineText = async (
+    apiKeys: string[],
+    originalText: string,
+    instruction: string,
+    profile: StyleProfile,
+    onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
+): Promise<string> => {
+    return executeWithKeyRotation(apiKeys, async (ai) => {
+        const tuningInstructions = getMetricTuningInstructions(profile.metrics);
+        
+        const prompt = `
+            You are editing a script to match the specific persona of "${profile.name}".
+            
+            **PERSONA GUIDELINES:**
+            - Voice: ${profile.toneDescription}
+            - Verbal Tics: ${profile.styleDNA?.verbalTics}
+            - Style Rules: ${tuningInstructions.join("; ")}
+            
+            **ORIGINAL TEXT:**
+            "${originalText}"
+            
+            **YOUR TASK:**
+            Rewrite the text above. ${instruction}
+            
+            **CONSTRAINT:**
+            Keep the meaning, but change the FORM to match the persona perfectly. 
+            Output ONLY the rewritten text.
+        `;
+
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: prompt,
+            config: {
+                temperature: 1.5, // High temp for creative rewriting
+            }
+        });
+
+        return response.text ? response.text.trim() : originalText;
+    }, onStatusUpdate);
 };
