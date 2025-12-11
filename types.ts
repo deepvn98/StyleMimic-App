@@ -1,5 +1,4 @@
 
-
 export interface StyleMetrics {
   humor: number; // 0-100
   logic: number; // 0-100
@@ -60,6 +59,24 @@ export interface StyleProfile {
   styleSamples?: string[]; // Actual writing samples for style mimicry
   quantitativeAnalysis?: QuantitativeAnalysis; // Physical structure data
   structuralPatterns?: StructuralPatterns; // NEW: Specific anchors
+}
+
+// --- NEW STRUCTURAL INTERFACES ---
+
+export interface CustomSection {
+  id: string;
+  name: string; // e.g. "The Hook"
+  instruction: string; // e.g. "Start with a shocking statistic."
+  estimatedWords?: number; // Target word count for this section
+}
+
+export interface WritingStructure {
+  id: string;
+  name: string; // e.g. "Viral LinkedIn Post"
+  description: string;
+  sections: CustomSection[];
+  userId?: string;
+  savedAt?: number;
 }
 
 export interface AnalysisResult {

@@ -1,5 +1,6 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
-import { StyleProfile, StyleMetrics, ContentType, LocationSuggestion } from "../types";
+import { StyleProfile, StyleMetrics, ContentType, LocationSuggestion, WritingStructure } from "../types";
 
 const ANALYSIS_MODEL = "gemini-2.5-flash";
 
@@ -276,6 +277,8 @@ export const suggestTravelLocations = async (
             
             Ensure these places exist and are highly rated by travelers.
             For each location, provide a name and a very brief reason why it's interesting.
+            
+            LANGUAGE: ENGLISH.
           `,
           config: {
             responseMimeType: "application/json",
@@ -319,15 +322,6 @@ export const suggestTravelLocations = async (
           throw new Error("Failed to parse location suggestions.");
         }
     }, onStatusUpdate);
-};
-
-const CONTENT_TYPE_INSTRUCTIONS: Record<ContentType, string> = {
-  general: "Structure the script in a standard conversational format relevant to the topic.",
-  travel: "Format: RAW STYLE MIMICRY. Strictly adhere to the persona's voice and structure. No generic 'Documentary' style unless the persona naturally matches it.",
-  news: "Structure: News Report. Use the 'Inverted Pyramid' style.",
-  tech: "Structure: Product/Tech Review.",
-  story: "Structure: Narrative Storytelling.",
-  educational: "Structure: Tutorial/Educational."
 };
 
 /**
@@ -380,7 +374,7 @@ const getMetricTuningInstructions = (metrics: StyleMetrics): string[] => {
 
 /**
  * Generates a new script based on a specific style profile.
- * UPDATED: Uses System Instructions and Negative Constraints for better mimicry.
+ * UPDATED: Now uses STRICT JSON INPUT to separate CUSTOM_STRUCTURE vs AUTO_DNA logic.
  */
 export const generateScript = async (
   apiKeys: string[],
@@ -390,146 +384,129 @@ export const generateScript = async (
   selectedLocations: LocationSuggestion[] = [],
   targetLength: number = 250,
   creativityLevel: number = 1.35, // NEW: Temperature control
+  customStructure: WritingStructure | null = null, // NEW: Custom Structure Override
   onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
 ): Promise<string> => {
     return executeWithKeyRotation(apiKeys, async (ai) => {
-        const formatInstruction = CONTENT_TYPE_INSTRUCTIONS[contentType];
         
-        // --- 1. STYLE CONDITIONING (SAMPLES) ---
-        // We use samples to 'prime' the model's style vector.
-        const samplesBlock = profile.styleSamples && profile.styleSamples.length > 0
-          ? `
-          ### STYLE CONDITIONING (THE SOURCE OF TRUTH) ###
-          You are a method actor. Your entire personality is defined by these samples.
-          Mimic the sentence length, the vocabulary choice, and the specific "flavor" of the text below.
-          
-          ${profile.styleSamples.map((s, i) => `--- STYLE SAMPLE ${i+1} ---\n${s}`).join('\n')}
-          `
-          : "";
+        // 1. DETERMINE MODE & CALCULATE BLUEPRINT
+        const MODE = customStructure ? "CUSTOM_STRUCTURE" : "AUTO_DNA";
+        let blueprint: any[] = [];
+        let totalEstimatedWords = 0;
 
-        // --- 2. STRUCTURAL TUNING (SKELETON) ---
-        let blueprintBlock = "";
-        
-        if (profile.quantitativeAnalysis && profile.quantitativeAnalysis.structureSkeleton) {
-             const originalTotal = profile.quantitativeAnalysis.totalWordCount || 1000;
-             const scaleFactor = targetLength / originalTotal;
-             
-             const scaledSkeleton = profile.quantitativeAnalysis.structureSkeleton.map(sec => ({
-                 name: sec.sectionName,
-                 purpose: sec.purpose,
-                 targetWords: Math.max(15, Math.round(sec.estimatedWords * scaleFactor)) 
-             }));
-
-             blueprintBlock = `
-             ### STRUCTURAL BLUEPRINT (NON-NEGOTIABLE) ###
-             Follow this narrative arc exactly.
-             
-             ${scaledSkeleton.map((sec, i) => 
-                `[SECTION ${i+1}] "${sec.name}" (~${sec.targetWords} words)
-                 -> GOAL: ${sec.purpose}`
-             ).join('\n')}
-             
-             **Formatting:** Use '${profile.quantitativeAnalysis.subHeaderStyle}' style headers.
-             `;
-        }
-
-        // --- 3. PROMPT TUNING (METRICS -> INSTRUCTIONS) ---
-        // Convert abstract numbers into concrete writing rules
-        const tuningInstructions = getMetricTuningInstructions(profile.metrics);
-        const tuningBlock = tuningInstructions.length > 0 
-            ? `### PROMPT TUNING (NON-NEGOTIABLE RULES) ###\n${tuningInstructions.map(t => `- ${t}`).join('\n')}`
-            : "";
-        
-        // --- 4. STRUCTURAL ANCHORING ---
-        let structuralAnchors = "";
-        if (profile.structuralPatterns) {
-            const intros = profile.structuralPatterns.introPhrases.join(" OR ");
-            const outros = profile.structuralPatterns.outroPhrases.join(" OR ");
-            const transitions = profile.structuralPatterns.transitionPhrases.join(", ");
+        if (customStructure) {
+            // CASE A: CUSTOM STRUCTURE MODE
+            // Calculate total from Custom Structure
+            totalEstimatedWords = customStructure.sections.reduce((sum, sec) => sum + (sec.estimatedWords || 100), 0);
             
-            structuralAnchors = `
-            ### STRUCTURAL ANCHORS (MANDATORY) ###
-            1. **OPENING:** You MUST start with one of these exact phrases (or a tiny variation): "${intros}".
-            2. **TRANSITIONS:** Use specific bridges like: "${transitions}".
-            3. **CLOSING:** You MUST end with one of these exact phrases: "${outros}".
-            `;
+            blueprint = customStructure.sections.map(sec => ({
+                sectionName: sec.name,
+                intent: sec.instruction,
+                wordTarget: sec.estimatedWords || 100,
+                // Inflation advice for longer sections
+                instruction: sec.estimatedWords && sec.estimatedWords > 150 ? "DEEP DIVE REQUIRED. Elaborate extensively." : "Concise."
+            }));
+        } else if (profile.quantitativeAnalysis && profile.quantitativeAnalysis.structureSkeleton) {
+            // CASE B: AUTO DNA MODE
+            // Scale profile skeleton to user's targetLength
+            const originalTotal = profile.quantitativeAnalysis.totalWordCount || 1000;
+            const scaleFactor = targetLength / originalTotal;
+            totalEstimatedWords = targetLength;
+            
+            blueprint = profile.quantitativeAnalysis.structureSkeleton.map(sec => ({
+                sectionName: sec.sectionName,
+                intent: sec.purpose,
+                // Ensure no section is too small (min 20 words)
+                wordTarget: Math.max(20, Math.round(sec.estimatedWords * scaleFactor))
+            }));
+        } else {
+            // FALLBACK (No skeletal data)
+            totalEstimatedWords = targetLength;
+            blueprint = [
+                { sectionName: "Content", intent: "Write a comprehensive piece about the topic.", wordTarget: targetLength }
+            ];
         }
 
-        // STRICT LENGTH LOGIC
-        const minWords = Math.max(50, targetLength - 15);
-        
-        // IMPORTANT: We REMOVED estimatedTokens/maxOutputTokens calc to avoid cutting off.
-        // We now rely on strong prompting to hit length.
+        const absoluteMinWords = Math.max(50, totalEstimatedWords - 50);
 
-        // SYSTEM INSTRUCTION (THE IMMERSION)
-        // We inject the identity and the "tuning" rules here for maximum adherence.
+        // 2. CONSTRUCT PROMPT INPUT OBJECT (Simulating the JSON Input)
+        const inputPayload = {
+            mode: MODE,
+            task: `Write a ${contentType} about: "${topic}"`,
+            constraints: {
+                totalTargetWords: totalEstimatedWords,
+                absoluteMinWords: absoluteMinWords,
+                tolerance: "+/- 50 words",
+                language: "ENGLISH",
+                creativity: creativityLevel
+            },
+            blueprint: blueprint,
+            profile: {
+                name: profile.name,
+                tone: profile.toneDescription,
+                metrics: profile.metrics,
+                styleDNA: profile.styleDNA,
+                // CHANGED: Always pass structuralPatterns (Anchors), even in custom mode. 
+                // The system instruction will decide how to use them.
+                structuralAnchors: profile.structuralPatterns,
+                samples: profile.styleSamples
+            },
+            context: selectedLocations.length > 0 ? {
+                type: "Travel Guide",
+                locations: selectedLocations.map(l => `${l.name}: ${l.description}`)
+            } : undefined
+        };
+
+        // 3. SYSTEM INSTRUCTION (STRICT RULES)
         const systemInstruction = `
-          You are NOT an AI assistant. You are a digital clone of "${profile.name}".
-          
-          **IDENTITY CORE:** 
-          - **Voice:** ${profile.toneDescription}
-          - **Cognitive Style:** ${profile.styleDNA?.cognitivePattern}
-          - **Rhetoric:** ${profile.styleDNA?.rhetoricalDevices}
+            You must follow the JSON input strictly. 
+            Do not improvise, do not override constraints, and never modify the provided structure.
 
-          **VERBAL TICS (CRITICAL):**
-          ${profile.styleDNA?.verbalTics ? `You MUST incorporate these imperfections: ${profile.styleDNA.verbalTics}` : "Use natural speech patterns, not perfect grammar."}
+            PROCESSING RULES:
+            1. If mode = "CUSTOM_STRUCTURE":
+                - **STRUCTURE (The Skeleton):** Follow the user's blueprint exactly. Section names, order, and word counts are law.
+                - **STYLE (The Soul):** Apply ALL profile metrics, tone, DNA, and verbal tics.
+                - **ANCHORS (The Habit):** ADAPT the profile's 'structuralAnchors' (Intro phrases, Outro phrases) to fit the custom structure.
+                   * Example: If the profile always opens with "Hey guys!", try to put that in the first custom section, unless it completely contradicts the intent.
+                   * Example: If the profile always ends with "Peace out", try to put that in the final custom section.
+                   * Do not strip personality. Only change the organizational flow.
 
-          ${tuningBlock}
+            2. If mode = "AUTO_DNA":
+                - Ignore the user blueprint entirely.
+                - Use the profile’s structural skeleton as the only structure.
+                - Scale each skeleton section according to constraints.targetLength.
+                - Apply ALL profile anchors strictly:
+                    * Required intro phrases
+                    * Required transition habits
+                    * Required outro phrases
+                - Apply tone, cognitive pattern, lexical signature, verbal tics, and rhetorical habits.
+                - Maintain the natural flow and habits of the profile writer.
 
-          **DEPROGRAMMING PROTOCOL (NEGATIVE CONSTRAINTS):**
-          1. **NO AI "SLOP":** Do not use phrases like "In conclusion", "It is important to note", "Delving into", "Tapestry", "Bustling", "Key Takeaways".
-          2. **NO SYMMETRY:** Vary paragraph lengths. Some huge, some tiny.
-          3. **NO NEUTRALITY:** Be opinionated. Subjective. Biased.
-          
-          **DIRECTIVE:**
-          If user instructions conflict with the Style Samples, **THE STYLE SAMPLES WIN**.
+            3. UNIVERSAL STYLE RULES (applies to both modes):
+                - Apply styleMetrics to adjust emotion, humor, complexity, pacing, and informality.
+                - Always include verbal tics from profile.
+                - Use the samples inside profile.samples as style conditioning. Mimic their sentence rhythm, pause length, and word patterns.
+                - Enforce constraints.absoluteMinWords:
+                    * If output < minimum → expand content with deeper explanation or examples.
+                - Avoid repeating sample sentences verbatim; only mimic style.
+                - **DEPROGRAMMING:** Do not use AI clichés ("In conclusion", "Tapestry", "Delving"). Be raw and human.
+
+            4. OUTPUT FORMAT:
+                - Output ONLY the generated text in Markdown.
+                - Include section headers (## Section Name) as defined in the blueprint.
+                - **IMPORTANT: Insert a horizontal rule separator ('---') after every section to clearly separate parts for the reader.**
+                - LANGUAGE: English.
         `;
 
-        // CONTENT PROMPT (THE TASK)
-        let contentSpecificPrompt = `
-          **TASK:** Write a script/article about: "${topic}"
-          
-          ${samplesBlock}
-          
-          ${blueprintBlock}
-
-          ${structuralAnchors}
-          
-          **EXECUTION RULES:**
-          1. **TARGET LENGTH:** ${minWords} words MINIMUM. 
-          2. **EXPANSION PROTOCOL:** The user has requested a LONG form content. Do not summarize. Do not rush. You must expand fully on every single point. Decompose every thought into multiple paragraphs.
-          3. **Signature Phrases:** Integrate: ${profile.signaturePhrases.join(", ")}.
-          
-          Output ONLY the content in Markdown. No preamble.
-        `;
-
-        // Handle Travel Specifics
-        if (contentType === 'travel' && selectedLocations.length > 0) {
-           const locs = selectedLocations.map(l => `- ${l.name}: ${l.description}`).join('\n');
-           contentSpecificPrompt = `
-             TASK: Write a travelogue about these spots in the voice of "${profile.name}":
-             ${locs}
-             
-             ${samplesBlock}
-             ${blueprintBlock}
-             ${structuralAnchors}
-             
-             **STRICT MIMICRY RULES:**
-             - **No Tour Guide Voice:** Do not sound like Wikipedia. Sound like the persona visiting these places.
-             - **Word Count:** ~${Math.round(targetLength / selectedLocations.length)} words per location.
-             - **Expansion:** Describe sights, smells, and feelings in detail to meet the word count.
-           `;
-        }
-      
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: contentSpecificPrompt,
+          // Pass the structured input as the prompt
+          contents: `INPUT JSON:\n${JSON.stringify(inputPayload, null, 2)}`,
           config: {
             systemInstruction: systemInstruction,
-            // REMOVED maxOutputTokens to prevent abrupt cut-offs.
-            temperature: creativityLevel, // Dynamic Temperature
+            temperature: creativityLevel, 
             thinkingConfig: { 
-                thinkingBudget: 4096 // Max thinking for style planning
+                thinkingBudget: 4096 
             }
           }
         });
@@ -558,6 +535,7 @@ export const refineText = async (
             - Voice: ${profile.toneDescription}
             - Verbal Tics: ${profile.styleDNA?.verbalTics}
             - Style Rules: ${tuningInstructions.join("; ")}
+            - **LANGUAGE:** ENGLISH (Output must be in English).
             
             **ORIGINAL TEXT:**
             "${originalText}"

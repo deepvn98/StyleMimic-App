@@ -1,12 +1,12 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, Pencil, Check, Settings2, Folder, Key, Lock, LogIn, Cloud, Zap, AlertTriangle, Circle, Shield, List, Info, LayoutGrid, Ruler, PieChart, Anchor, ExternalLink, Wand2, Scissors, Quote, ZapIcon } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, Pencil, Check, Settings2, Folder, Key, Lock, LogIn, Cloud, Zap, AlertTriangle, Circle, Shield, List, Info, LayoutGrid, Ruler, PieChart, Anchor, ExternalLink, Wand2, Scissors, Quote, Grid, PlusCircle, MoveVertical } from 'lucide-react';
 import { analyzeTranscript, generateScript, suggestTravelLocations, refineText } from './services/geminiService';
-import { authenticate } from './services/authService';
+import { authenticate, generateUUID } from './services/authService';
 import { saveProfileToCloud, getUserProfiles, deleteProfileFromCloud, updateProfileInCloud } from './services/profileService';
 import { saveUserApiKeys, getUserApiKeys } from './services/settingsService';
+import { saveStructureToCloud, getUserStructures, deleteStructureFromCloud, updateStructureInCloud } from './services/structureService';
 import AdminPanel from './components/AdminPanel';
-import { StyleProfile, Tab, AppState, ContentType, LocationSuggestion, KeyStatus } from './types';
+import { StyleProfile, Tab, AppState, ContentType, LocationSuggestion, KeyStatus, WritingStructure, CustomSection } from './types';
 import StyleRadar from './components/RadarChart';
 
 // Sample default profile
@@ -87,6 +87,23 @@ const App: React.FC = () => {
   const [contentType, setContentType] = useState<ContentType>('general');
   const [generatedScript, setGeneratedScript] = useState<string>('');
   const [isRefining, setIsRefining] = useState(false); // Refinement loading state
+  const [isCopied, setIsCopied] = useState(false); // Copy feedback state
+  
+  // OUTPUT REF for ContentEditable
+  const outputRef = useRef<HTMLDivElement>(null);
+
+  // Sync contentEditable div with state (one-way binding for external updates)
+  useEffect(() => {
+    if (outputRef.current && generatedScript !== outputRef.current.innerText) {
+       outputRef.current.innerText = generatedScript;
+    }
+  }, [generatedScript]);
+
+  // STRUCTURE STATE (NEW)
+  const [savedStructures, setSavedStructures] = useState<WritingStructure[]>([]);
+  const [selectedStructureId, setSelectedStructureId] = useState<string>('auto'); // 'auto' means use Profile DNA
+  const [showStructureModal, setShowStructureModal] = useState(false);
+  const [editingStructureId, setEditingStructureId] = useState<string | null>(null); // Track which structure is being edited
   
   // Settings
   const [targetLength, setTargetLength] = useState<number>(2000);
@@ -102,6 +119,8 @@ const App: React.FC = () => {
 
   // View Details State
   const [viewingProfile, setViewingProfile] = useState<StyleProfile | null>(null);
+  // NEW: Track which profile is highlighted in library (preview only)
+  const [previewProfileId, setPreviewProfileId] = useState<string | null>(null);
 
   // Modal State (Save/Rename)
   const [modalState, setModalState] = useState<{
@@ -119,6 +138,19 @@ const App: React.FC = () => {
     inputContentType: 'general',
     isSaving: false
   });
+
+  // STRUCTURE MODAL STATE
+  const [newStructureName, setNewStructureName] = useState('');
+  const [newStructureDesc, setNewStructureDesc] = useState('');
+  const [newStructureSections, setNewStructureSections] = useState<CustomSection[]>([
+    { id: '1', name: 'Introduction', instruction: 'Hook the reader immediately.', estimatedWords: 50 },
+    { id: '2', name: 'Main Body', instruction: 'Explain the core concept.', estimatedWords: 200 },
+    { id: '3', name: 'Conclusion', instruction: 'Summarize and give a call to action.', estimatedWords: 50 }
+  ]);
+  const [isSavingStructure, setIsSavingStructure] = useState(false);
+  
+  // DRAG AND DROP STATE
+  const [draggedSectionIndex, setDraggedSectionIndex] = useState<number | null>(null);
 
   // CHECK SESSION ON LOAD
   useEffect(() => {
@@ -143,41 +175,59 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // LOAD PROFILES (Cloud vs Local)
+  // Sync preview when entering library
   useEffect(() => {
-    const loadProfiles = async () => {
+    if (activeTab === Tab.LIBRARY && currentProfile) {
+      setPreviewProfileId(currentProfile.id);
+    }
+  }, [activeTab, currentProfile]);
+
+  // LOAD PROFILES & STRUCTURES
+  useEffect(() => {
+    const loadUserData = async () => {
       if (!isAuthenticated || appState === AppState.LOCKED) return;
       
-      // If we have a real Cloud User ID (not a demo/local one)
-      if (currentUserId && currentUserId !== 'demo-local-user' && currentUserId !== 'static-user') {
+      const isCloudUser = currentUserId && currentUserId !== 'demo-local-user' && currentUserId !== 'static-user';
+
+      if (isCloudUser) {
         setIsLibraryLoading(true);
         try {
+           // Load Profiles
            const cloudProfiles = await getUserProfiles(currentUserId);
-           setSavedProfiles([DEFAULT_PROFILE, ...cloudProfiles]);
+           const allP = [DEFAULT_PROFILE, ...cloudProfiles];
+           setSavedProfiles(allP);
+           // NOTE: Do not auto-select profile
+
+           // Load Structures
+           const cloudStructures = await getUserStructures(currentUserId);
+           setSavedStructures(cloudStructures);
         } catch (e) {
-           console.error("Failed to load cloud profiles", e);
-           // Fallback to default if error
+           console.error("Failed to load cloud data", e);
            setSavedProfiles([DEFAULT_PROFILE]);
         } finally {
            setIsLibraryLoading(false);
         }
       } else {
-        // Fallback to LocalStorage for Demo/Static users
+        // Fallback to LocalStorage
         try {
-          const saved = localStorage.getItem('styleMimic_profiles');
-          let parsed = saved ? JSON.parse(saved) : [DEFAULT_PROFILE];
-          parsed = parsed.map((p: any) => ({
-              ...p,
-              contentType: p.contentType || 'general'
-          }));
-          setSavedProfiles(parsed);
+          // Profiles
+          const savedP = localStorage.getItem('styleMimic_profiles');
+          let parsedP = savedP ? JSON.parse(savedP) : [DEFAULT_PROFILE];
+          parsedP = parsedP.map((p: any) => ({ ...p, contentType: p.contentType || 'general' }));
+          setSavedProfiles(parsedP);
+          // NOTE: Do not auto-select profile
+
+          // Structures
+          const savedS = localStorage.getItem('styleMimic_structures');
+          const parsedS = savedS ? JSON.parse(savedS) : [];
+          setSavedStructures(parsedS);
         } catch (e) {
           setSavedProfiles([DEFAULT_PROFILE]);
         }
       }
     };
 
-    loadProfiles();
+    loadUserData();
   }, [isAuthenticated, currentUserId, appState]);
 
   // --- HANDLERS ---
@@ -217,14 +267,11 @@ const App: React.FC = () => {
                   setUserApiKeys(cloudKeys);
                   localStorage.setItem('styleMimic_apiKeys', JSON.stringify(cloudKeys));
                 } else {
-                  // No cloud keys, check local cache but don't auto-save local to cloud yet
-                  // to avoid overwriting empty cloud with potentially wrong local data
                   const storedKeys = localStorage.getItem('styleMimic_apiKeys');
                   if (storedKeys) setUserApiKeys(JSON.parse(storedKeys));
                   else setUserApiKeys([]);
                 }
               } catch (e) {
-                // Fallback to local
                 const storedKeys = localStorage.getItem('styleMimic_apiKeys');
                 if (storedKeys) setUserApiKeys(JSON.parse(storedKeys));
               }
@@ -298,6 +345,9 @@ const App: React.FC = () => {
     setLicenseKey('');
     setCurrentUserId(null);
     setSavedProfiles([]);
+    setSavedStructures([]);
+    setCurrentProfile(null);
+    setPreviewProfileId(null);
     
     // RESET LOADING STATE to fix infinite loading button
     setIsCheckingAuth(false); 
@@ -366,6 +416,7 @@ const App: React.FC = () => {
     try {
       const profile = await analyzeTranscript(userApiKeys, combinedTranscript, handleKeyStatusUpdate);
       setCurrentProfile(profile);
+      setPreviewProfileId(profile.id);
       setActiveTab(Tab.GENERATE);
     } catch (error) {
       handleError(error, "Failed to analyze text.");
@@ -412,11 +463,34 @@ const App: React.FC = () => {
 
   const handleGenerate = useCallback(async () => {
     if (!checkApiKeys()) return;
-    if (!topic.trim() || !currentProfile) return;
+    if (!topic.trim()) return;
+    
+    // NEW: Alert user if no profile is selected when clicking generate
+    if (!currentProfile) {
+        alert("⚠️ Chưa có Model nào được chọn!\n\nVui lòng chọn một Style Model từ Library hoặc Analyze mới trước khi viết bài.");
+        return;
+    }
 
     const selectedLocs = contentType === 'travel' ? locations.filter(l => l.isSelected) : [];
+    
+    // Find selected custom structure
+    let activeStructure: WritingStructure | null = null;
+    if (selectedStructureId !== 'auto') {
+        activeStructure = savedStructures.find(s => s.id === selectedStructureId) || null;
+    }
+
+    // --- NEW LOGIC START ---
+    // If using a custom structure, calculate total words from the structure itself.
+    // This overrides the 'targetLength' slider variable.
+    let effectiveLength = targetLength;
+    if (activeStructure) {
+        effectiveLength = activeStructure.sections.reduce((sum, sec) => sum + (sec.estimatedWords || 0), 0);
+    }
+    // --- NEW LOGIC END ---
+
     setAppState(AppState.GENERATING);
     setGeneratedScript('');
+    
     try {
       const script = await generateScript(
           userApiKeys, 
@@ -424,11 +498,13 @@ const App: React.FC = () => {
           currentProfile, 
           contentType, 
           selectedLocs, 
-          targetLength,
+          effectiveLength, // Pass effectiveLength (Structure Total) instead of slider value
           creativityLevel,
+          activeStructure, // Pass structure
           handleKeyStatusUpdate
       );
       setGeneratedScript(script);
+
       if (contentType === 'travel') {
         setShowLocationSelector(false);
       }
@@ -437,7 +513,161 @@ const App: React.FC = () => {
     } finally {
       setAppState(AppState.IDLE);
     }
-  }, [topic, currentProfile, contentType, locations, targetLength, creativityLevel, userApiKeys, handleKeyStatusUpdate]);
+  }, [topic, currentProfile, contentType, locations, targetLength, creativityLevel, userApiKeys, selectedStructureId, savedStructures, handleKeyStatusUpdate]);
+
+  // --- STRUCTURE MANAGEMENT HANDLERS ---
+  
+  const handleOpenCreateStructure = () => {
+    setEditingStructureId(null);
+    setNewStructureName('');
+    setNewStructureDesc('');
+    setNewStructureSections([{ id: '1', name: 'Intro', instruction: 'Hook', estimatedWords: 50 }]);
+    setShowStructureModal(true);
+  };
+
+  const handleEditStructure = (structureId: string) => {
+    const struct = savedStructures.find(s => s.id === structureId);
+    if (!struct) return;
+    
+    setEditingStructureId(structureId);
+    setNewStructureName(struct.name);
+    setNewStructureDesc(struct.description);
+    // Ensure we create a copy of sections so edits don't mutate state directly until save
+    setNewStructureSections(struct.sections.map(s => ({...s}))); 
+    setShowStructureModal(true);
+  };
+
+  const handleAddStructureSection = () => {
+      setNewStructureSections([
+          ...newStructureSections,
+          { id: generateUUID(), name: '', instruction: '', estimatedWords: 100 }
+      ]);
+  };
+
+  const handleUpdateSection = (id: string, field: 'name' | 'instruction' | 'estimatedWords', value: string | number) => {
+      setNewStructureSections(prev => prev.map(s => 
+          s.id === id ? { ...s, [field]: value } : s
+      ));
+  };
+
+  const handleRemoveSection = (id: string) => {
+      if (newStructureSections.length <= 1) return;
+      setNewStructureSections(prev => prev.filter(s => s.id !== id));
+  };
+  
+  // DRAG AND DROP HANDLERS
+  const handleDragStart = (index: number) => {
+      setDraggedSectionIndex(index);
+  };
+
+  const handleDragEnter = (index: number) => {
+      if (draggedSectionIndex === null || draggedSectionIndex === index) return;
+      
+      const newSections = [...newStructureSections];
+      const draggedItem = newSections[draggedSectionIndex];
+      
+      // Remove item from old pos
+      newSections.splice(draggedSectionIndex, 1);
+      // Insert at new pos
+      newSections.splice(index, 0, draggedItem);
+      
+      setNewStructureSections(newSections);
+      setDraggedSectionIndex(index);
+  };
+
+  const handleDragEnd = () => {
+      setDraggedSectionIndex(null);
+  };
+
+  const handleSaveStructure = async () => {
+      // FIX: Added explicit validation alert for name
+      if (!newStructureName.trim()) {
+          alert("Please enter a name for your structure template.");
+          return;
+      }
+      if (newStructureSections.some(s => !s.name.trim() || !s.instruction.trim())) {
+          alert("All structure sections must have a Name and Instruction.");
+          return;
+      }
+
+      setIsSavingStructure(true);
+      const isCloudUser = currentUserId && currentUserId !== 'demo-local-user' && currentUserId !== 'static-user';
+
+      try {
+          if (editingStructureId) {
+             // --- UPDATE MODE ---
+             const updates = {
+                 name: newStructureName.trim(),
+                 description: newStructureDesc.trim(),
+                 sections: newStructureSections
+             };
+             
+             if (isCloudUser) {
+                 await updateStructureInCloud(editingStructureId, updates);
+                 setSavedStructures(prev => prev.map(s => s.id === editingStructureId ? { ...s, ...updates } : s));
+             } else {
+                 const updatedList = savedStructures.map(s => s.id === editingStructureId ? { ...s, ...updates, savedAt: Date.now() } : s);
+                 setSavedStructures(updatedList);
+                 localStorage.setItem('styleMimic_structures', JSON.stringify(updatedList));
+             }
+          } else {
+             // --- CREATE MODE ---
+             // FIX: Replaced crypto.randomUUID() with robust generateUUID()
+              const newStructure: WritingStructure = {
+                  id: isCloudUser ? '' : generateUUID(),
+                  name: newStructureName.trim(),
+                  description: newStructureDesc.trim(),
+                  sections: newStructureSections,
+                  userId: currentUserId || undefined
+              };
+
+              if (isCloudUser && currentUserId) {
+                  const saved = await saveStructureToCloud(currentUserId, newStructure);
+                  setSavedStructures(prev => [saved, ...prev]);
+                  setSelectedStructureId(saved.id);
+              } else {
+                  setSavedStructures(prev => [newStructure, ...prev]);
+                  // Local Persist
+                  const updated = [newStructure, ...savedStructures];
+                  localStorage.setItem('styleMimic_structures', JSON.stringify(updated));
+                  setSelectedStructureId(newStructure.id);
+              }
+          }
+
+          setShowStructureModal(false);
+          // Reset form handled by Open/Edit handlers, but good practice to clear here too
+          setNewStructureName('');
+          setNewStructureDesc('');
+          setEditingStructureId(null);
+      } catch (e) {
+          console.error(e);
+          alert("Failed to save structure. See console for details.");
+      } finally {
+          setIsSavingStructure(false);
+      }
+  };
+
+  const handleDeleteStructure = async (id: string) => {
+      if (!confirm("Delete this structure template?")) return;
+      
+      const isCloudUser = currentUserId && currentUserId !== 'demo-local-user' && currentUserId !== 'static-user';
+      const prev = [...savedStructures];
+      
+      setSavedStructures(list => list.filter(s => s.id !== id));
+      if (selectedStructureId === id) setSelectedStructureId('auto');
+
+      try {
+          if (isCloudUser) {
+              await deleteStructureFromCloud(id);
+          } else {
+              const updated = prev.filter(s => s.id !== id);
+              localStorage.setItem('styleMimic_structures', JSON.stringify(updated));
+          }
+      } catch (e) {
+          setSavedStructures(prev); // Revert
+          alert("Failed to delete structure.");
+      }
+  };
 
   const handleRefine = async (instruction: string) => {
       if (!generatedScript || !currentProfile || !checkApiKeys()) return;
@@ -532,7 +762,9 @@ const App: React.FC = () => {
         const successful = document.execCommand('copy');
         selection.removeAllRanges();
         if (successful) {
-          alert("Success! Formatted text copied for Google Docs.");
+          // Changed: Feedback via button state instead of alert
+          setIsCopied(true);
+          setTimeout(() => setIsCopied(false), 3000);
         } else {
           throw new Error("Copy command failed");
         }
@@ -541,7 +773,9 @@ const App: React.FC = () => {
       console.error("Copy failed", err);
       // Fallback
       navigator.clipboard.writeText(generatedScript);
-      alert("Could not copy formatting. Copied plain text instead.");
+      // Still show feedback on fallback
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 3000);
     } finally {
       document.body.removeChild(tempDiv);
     }
@@ -594,7 +828,8 @@ const App: React.FC = () => {
             ...currentProfile, 
             name: name,
             contentType: modalState.inputContentType,
-            id: isCloudUser ? '' : crypto.randomUUID()
+            // FIX: Replaced crypto.randomUUID with generateUUID
+            id: isCloudUser ? '' : generateUUID()
         };
 
         if (isCloudUser) {
@@ -602,10 +837,12 @@ const App: React.FC = () => {
            if (savedCloudProfile) {
                setSavedProfiles(prev => [...prev, savedCloudProfile]);
                setCurrentProfile(savedCloudProfile);
+               setPreviewProfileId(savedCloudProfile.id);
            }
         } else {
            setSavedProfiles(prev => [...prev, newProfile as StyleProfile]);
            setCurrentProfile(newProfile as StyleProfile);
+           setPreviewProfileId(newProfile.id as string);
            const updated = [...savedProfiles, newProfile as StyleProfile];
            localStorage.setItem('styleMimic_profiles', JSON.stringify(updated));
         }
@@ -657,6 +894,7 @@ const App: React.FC = () => {
     // Remove from UI immediately (Optimistic)
     const previous = [...savedProfiles];
     setSavedProfiles(prev => prev.filter(p => p.id !== id));
+    if (previewProfileId === id) setPreviewProfileId(null);
 
     const isCloudUser = currentUserId && currentUserId !== 'demo-local-user' && currentUserId !== 'static-user';
     
@@ -676,6 +914,7 @@ const App: React.FC = () => {
 
   const handleSelectProfile = (profile: StyleProfile) => {
     setCurrentProfile(profile);
+    setPreviewProfileId(profile.id); // Highlight it as well
     setActiveTab(Tab.GENERATE);
   };
 
@@ -687,6 +926,13 @@ const App: React.FC = () => {
     { id: 'story', label: 'Storytelling', icon: Mic },
     { id: 'educational', label: 'Educational / How-To', icon: BookOpen },
   ];
+
+  // Helper calculation for active structure UI
+  const activeStructureForUI = savedStructures.find(s => s.id === selectedStructureId);
+  const isCustomStructureMode = selectedStructureId !== 'auto';
+  const customStructureLength = activeStructureForUI 
+    ? activeStructureForUI.sections.reduce((sum, sec) => sum + (sec.estimatedWords || 0), 0) 
+    : 0;
 
   const sliderMin = contentType === 'travel' ? 100 : 1000;
   const sliderMax = contentType === 'travel' ? 500 : 5000;
@@ -727,7 +973,7 @@ const App: React.FC = () => {
                </div>
                <input
                  type="password"
-                 className={`block w-full pl-10 pr-3 py-4 border rounded-xl leading-5 bg-gray-950 text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-all ${authError ? 'border-red-500 focus:ring-red-500' : 'border-gray-700 focus:border-neon-cyan focus:ring-neon-cyan/50'}`}
+                 className={`block w-full pl-10 pr-3 py-4 border rounded-xl leading-5 bg-gray-950 text-white placeholder-gray-500 focus:outline-none focus:ring-2 transition-all ${authError ? 'border-red-500 focus:ring-red-500' : 'border-gray-700 focus:border-neon-cyan focus:border-neon-cyan/50'}`}
                  placeholder="License Key"
                  value={licenseKey}
                  onChange={(e) => {
@@ -902,7 +1148,7 @@ const App: React.FC = () => {
                   <div>
                     <span className="text-xs font-mono text-neon-purple uppercase tracking-wider">Active Model</span>
                     <h3 className="text-xl font-bold text-white mt-1 pr-2 break-words">
-                      {currentProfile ? currentProfile.name : "No Model Loaded"}
+                      {currentProfile ? currentProfile.name : "No Model Selected"}
                     </h3>
                   </div>
                   {currentProfile && (
@@ -918,8 +1164,15 @@ const App: React.FC = () => {
                     <StyleRadar metrics={currentProfile.metrics} />
                   </>
                 ) : (
-                  <div className="text-center py-10 text-gray-500 text-sm">
-                    Go to <b className="text-gray-300 cursor-pointer" onClick={() => setActiveTab(Tab.ANALYZE)}>Analyze</b> to create a model.
+                  <div className="flex flex-col items-center justify-center py-6 text-center px-4 bg-gray-950/50 rounded-lg">
+                    <div className="w-12 h-12 bg-gray-800 rounded-full flex items-center justify-center mb-3">
+                        <Brain className="w-6 h-6 text-gray-500" />
+                    </div>
+                    <h3 className="text-gray-300 font-bold mb-1">Chưa có Model</h3>
+                    <p className="text-gray-500 text-sm mb-4 leading-relaxed">
+                        Vui lòng quay lại <span className="text-neon-cyan cursor-pointer hover:underline font-bold" onClick={() => setActiveTab(Tab.ANALYZE)}>Analyze</span> để phân tích<br/>
+                        hoặc chọn Model có sẵn trong <span className="text-neon-cyan cursor-pointer hover:underline font-bold" onClick={() => setActiveTab(Tab.LIBRARY)}>Library</span>.
+                    </p>
                   </div>
                 )}
               </div>
@@ -946,15 +1199,71 @@ const App: React.FC = () => {
                     </div>
                  </div>
 
+                 {/* NEW: WRITING STRUCTURE SELECTOR */}
+                 <div className="bg-gray-950/50 p-3 rounded-lg border border-gray-800">
+                     <div className="flex justify-between items-center mb-2">
+                        <h3 className="text-sm font-bold text-gray-200 flex items-center gap-2">
+                            <Grid className="w-3 h-3 text-neon-green" /> Structure Blueprint
+                        </h3>
+                        <button 
+                            onClick={handleOpenCreateStructure} 
+                            className="text-[10px] text-neon-green hover:underline flex items-center gap-1"
+                        >
+                            <PlusCircle className="w-3 h-3"/> New
+                        </button>
+                     </div>
+                     <select 
+                        value={selectedStructureId}
+                        onChange={(e) => setSelectedStructureId(e.target.value)}
+                        className="w-full bg-gray-900 text-sm text-white border border-gray-700 rounded p-2 focus:border-neon-green focus:outline-none"
+                     >
+                         <option value="auto">⚡ Auto (Use Profile's DNA)</option>
+                         <optgroup label="My Custom Structures">
+                             {savedStructures.map(s => (
+                                 <option key={s.id} value={s.id}>{s.name}</option>
+                             ))}
+                         </optgroup>
+                     </select>
+                     <div className="flex justify-between items-center mt-2">
+                         <p className="text-[10px] text-gray-500 italic max-w-[70%] truncate">
+                             {selectedStructureId === 'auto' 
+                                ? "Follows the natural structure found in analysis." 
+                                : savedStructures.find(s => s.id === selectedStructureId)?.description || "Custom structure applied."}
+                         </p>
+                         {selectedStructureId !== 'auto' && (
+                             <div className="flex items-center gap-1">
+                                 <button 
+                                    onClick={() => handleEditStructure(selectedStructureId)}
+                                    className="text-gray-400 hover:text-white p-1"
+                                    title="Edit this structure"
+                                 >
+                                     <Pencil className="w-3 h-3" />
+                                 </button>
+                                 <button 
+                                    onClick={() => handleDeleteStructure(selectedStructureId)}
+                                    className="text-red-500 hover:text-red-400 p-1" 
+                                    title="Delete this structure"
+                                 >
+                                     <Trash2 className="w-3 h-3" />
+                                 </button>
+                             </div>
+                         )}
+                     </div>
+                 </div>
+
                  <div className="space-y-4">
+                   {/* UPDATED: Length slider logic for Custom Structures */}
                    <div>
                      <div className="flex justify-between items-center mb-2">
                         <h3 className="text-sm font-bold text-gray-200 flex items-center gap-2">
                           <Settings2 className="w-3 h-3 text-neon-cyan" />
                           Length
                         </h3>
-                        <span className="text-xs font-mono text-neon-cyan">
-                          {targetLength} {contentType === 'travel' ? 'words/spot' : 'words'}
+                        <span className={`text-xs font-mono ${isCustomStructureMode ? 'text-gray-500' : 'text-neon-cyan'}`}>
+                          {isCustomStructureMode 
+                              ? `${customStructureLength} words (Fixed by Template)` 
+                              : `${targetLength} ${contentType === 'travel' ? 'words/spot' : 'words'}`
+                          }
                         </span>
                      </div>
                      <input 
@@ -962,17 +1271,23 @@ const App: React.FC = () => {
                         min={sliderMin}
                         max={sliderMax}
                         step={sliderStep}
-                        value={targetLength}
+                        value={isCustomStructureMode ? customStructureLength : targetLength}
+                        disabled={isCustomStructureMode}
                         onChange={(e) => setTargetLength(parseInt(e.target.value))}
-                        className="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-neon-cyan"
+                        className={`w-full h-2 bg-gray-800 rounded-lg appearance-none ${isCustomStructureMode ? 'cursor-not-allowed opacity-50' : 'cursor-pointer accent-neon-cyan'}`}
                      />
+                     {isCustomStructureMode && (
+                        <p className="text-[10px] text-gray-500 mt-1 italic">
+                            * Length is determined by the sum of section word counts in your custom structure.
+                        </p>
+                     )}
                    </div>
 
                    {/* NEW: CREATIVITY LEVEL SLIDER */}
                    <div>
                      <div className="flex justify-between items-center mb-2">
                         <h3 className="text-sm font-bold text-gray-200 flex items-center gap-2">
-                          <ZapIcon className="w-3 h-3 text-neon-purple" />
+                          <Zap className="w-3 h-3 text-neon-purple" />
                           Mimicry Strength
                         </h3>
                         <span className="text-xs font-mono text-neon-purple">
@@ -999,13 +1314,15 @@ const App: React.FC = () => {
                  <div className="flex-1 flex flex-col mt-2">
                     <h3 className="text-sm font-bold text-gray-200 mb-2">Topic / Prompt</h3>
                     <textarea
-                      className="w-full flex-1 bg-gray-950 border border-gray-800 rounded-lg p-3 text-gray-300 text-sm focus:outline-none focus:border-neon-purple mb-4 resize-none min-h-[200px]"
+                      className="w-full flex-1 bg-gray-950 border border-gray-800 rounded-lg p-3 text-gray-300 text-sm focus:outline-none focus:border-neon-purple mb-4 resize-none min-h-[150px]"
                       placeholder={`What should this ${contentType} be about?`}
                       value={topic}
                       onChange={(e) => setTopic(e.target.value)}
-                      disabled={!currentProfile || (contentType === 'travel' && showLocationSelector)}
+                      disabled={(contentType === 'travel' && showLocationSelector)}
                     />
                     
+                    {!currentProfile && <p className="text-xs text-yellow-500 text-center mb-2 animate-pulse">Select a Style Model above to proceed.</p>}
+
                     {contentType === 'travel' && !showLocationSelector ? (
                        <button
                          onClick={() => handleLocationSearch(false)}
@@ -1020,7 +1337,7 @@ const App: React.FC = () => {
                       ) : (
                         <button
                           onClick={handleGenerate}
-                          disabled={appState === AppState.GENERATING || !topic.trim() || !currentProfile}
+                          disabled={appState === AppState.GENERATING || !topic.trim()}
                           className="w-full flex items-center justify-center gap-2 bg-neon-purple hover:bg-purple-500 text-white font-bold py-3 px-6 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_15px_rgba(139,92,246,0.3)] hover:shadow-[0_0_25px_rgba(139,92,246,0.5)]"
                         >
                           {appState === AppState.GENERATING ? <><Loader2 className="w-5 h-5 animate-spin" /> Dreaming...</> : <><Play className="w-5 h-5 fill-current" /> Generate Script</>}
@@ -1078,8 +1395,9 @@ const App: React.FC = () => {
                                 </button>
                             )}
                             {generatedScript && (
-                                <button onClick={handleCopyToClipboard} className="text-xs flex items-center gap-1 text-gray-500 hover:text-white transition-colors border border-gray-700 hover:border-gray-500 px-3 py-1 rounded">
-                                    <Copy className="w-4 h-4" /> Copy for Docs
+                                <button onClick={handleCopyToClipboard} className={`text-xs flex items-center gap-1 transition-colors border px-3 py-1 rounded ${isCopied ? 'text-neon-green border-neon-green' : 'text-gray-500 hover:text-white border-gray-700 hover:border-gray-500'}`}>
+                                    {isCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />} 
+                                    {isCopied ? "Copied" : "Copy for Docs"}
                                 </button>
                             )}
                         </div>
@@ -1110,7 +1428,7 @@ const App: React.FC = () => {
                   </div>
 
                   {/* CONTENT AREA */}
-                  <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar relative">
+                  <div className="flex-1 relative overflow-hidden bg-gray-950/30 rounded-lg border border-gray-800/30">
                     {isRefining && (
                         <div className="absolute inset-0 bg-gray-900/50 backdrop-blur-[1px] flex items-center justify-center z-10">
                             <div className="bg-black/80 px-4 py-2 rounded-full flex items-center gap-2 text-neon-purple shadow-xl border border-gray-800">
@@ -1120,9 +1438,15 @@ const App: React.FC = () => {
                     )}
                     
                     {generatedScript ? (
-                      <div className="prose prose-invert prose-sm max-w-none prose-headings:text-neon-cyan prose-strong:text-white prose-p:text-gray-300 font-mono">
-                        <ReactMarkdown>{generatedScript}</ReactMarkdown>
-                      </div>
+                      <div
+                          ref={outputRef}
+                          contentEditable
+                          suppressContentEditableWarning
+                          className="w-full h-full bg-transparent border-none outline-none text-gray-200 text-base p-6 leading-relaxed custom-scrollbar overflow-y-auto whitespace-pre-wrap font-sans"
+                          style={{ fontFamily: 'Inter, sans-serif', fontSize: '16px' }}
+                          onInput={(e) => setGeneratedScript(e.currentTarget.innerText)}
+                          onBlur={(e) => setGeneratedScript(e.currentTarget.innerText)}
+                      />
                     ) : (
                       <div className="h-full flex flex-col items-center justify-center text-gray-700 gap-4">
                         <Sparkles className="w-12 h-12 opacity-20" />
@@ -1138,409 +1462,451 @@ const App: React.FC = () => {
 
         {/* VIEW: LIBRARY */}
         {activeTab === Tab.LIBRARY && (
-          <div className="h-full flex flex-col gap-6">
-            <div className="flex justify-between items-center">
-              <div>
-                <h2 className="text-2xl font-light text-white">Style Library</h2>
-                <p className="text-gray-400 text-sm">
-                  {currentUserId && currentUserId !== 'demo-local-user' && currentUserId !== 'static-user' 
-                     ? 'Cloud Storage Active (Synced)' 
-                     : 'Local Storage (This Device Only)'}
-                </p>
-              </div>
-            </div>
-
-            {isLibraryLoading ? (
-               <div className="flex-1 flex items-center justify-center">
-                  <Loader2 className="w-10 h-10 text-neon-cyan animate-spin" />
-               </div>
-            ) : savedProfiles.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-gray-600 gap-4 border-2 border-dashed border-gray-800 rounded-xl">
-                <Folder className="w-12 h-12 opacity-50" />
-                <p>No saved style models found.</p>
-                <button onClick={() => setActiveTab(Tab.ANALYZE)} className="text-neon-cyan hover:underline">Create your first model</button>
-              </div>
-            ) : (
-              <div className="flex-1 overflow-y-auto custom-scrollbar pb-4 space-y-10">
-                {contentTypes.map((type) => {
-                   const groupProfiles = savedProfiles.filter(p => (p.contentType || 'general') === type.id);
-                   if (groupProfiles.length === 0) return null;
-
-                   return (
-                     <div key={type.id} className="animate-in fade-in slide-in-from-bottom-2">
-                       <div className="flex items-center gap-2 mb-4 border-b border-gray-800 pb-2">
-                          <type.icon className="w-5 h-5 text-neon-cyan" />
-                          <h3 className="text-xl font-light text-gray-200">{type.label}</h3>
-                          <span className="text-xs bg-gray-800 text-gray-500 px-2 py-0.5 rounded-full">{groupProfiles.length}</span>
-                       </div>
-                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                          {groupProfiles.map(profile => (
-                            <div key={profile.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5 hover:border-gray-600 transition-all group relative flex flex-col">
-                              <div className="flex justify-between items-start mb-3">
-                                <div className="flex-1">
-                                    <h3 className="text-lg font-bold text-white line-clamp-1" title={profile.name}>{profile.name}</h3>
-                                </div>
-                                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <button onClick={() => setViewingProfile(profile)} className="p-1.5 hover:bg-gray-800 rounded text-gray-400 hover:text-neon-cyan" title="View DNA Details"><Info className="w-4 h-4" /></button>
-                                  <button onClick={() => handleOpenRenameModal(profile)} className="p-1.5 hover:bg-gray-800 rounded text-gray-400 hover:text-white" title="Rename"><Pencil className="w-4 h-4" /></button>
-                                  <button onClick={(e) => handleDeleteProfile(profile.id, e)} className="p-1.5 hover:bg-gray-800 rounded text-gray-400 hover:text-red-500" title="Delete"><Trash2 className="w-4 h-4" /></button>
-                                </div>
-                              </div>
-                              <p className="text-sm text-gray-400 mb-4 line-clamp-2">{profile.description}</p>
-                              
-                              {/* Style Metrics Grid */}
-                              <div className="grid grid-cols-3 gap-2 mb-4">
-                                  <div className="bg-gray-800 rounded p-1.5 text-center">
-                                      <div className="text-[10px] text-gray-500 uppercase font-mono">Humor</div>
-                                      <div className="text-sm font-bold text-neon-purple">{profile.metrics.humor}</div>
-                                  </div>
-                                  <div className="bg-gray-800 rounded p-1.5 text-center">
-                                      <div className="text-[10px] text-gray-500 uppercase font-mono">Logic</div>
-                                      <div className="text-sm font-bold text-neon-cyan">{profile.metrics.logic}</div>
-                                  </div>
-                                  <div className="bg-gray-800 rounded p-1.5 text-center">
-                                      <div className="text-[10px] text-gray-500 uppercase font-mono">Emotion</div>
-                                      <div className="text-sm font-bold text-neon-green">{profile.metrics.emotion}</div>
-                                  </div>
-                                  <div className="bg-gray-800 rounded p-1.5 text-center">
-                                      <div className="text-[10px] text-gray-500 uppercase font-mono">Complex</div>
-                                      <div className="text-sm font-bold text-white">{profile.metrics.complexity}</div>
-                                  </div>
-                                  <div className="bg-gray-800 rounded p-1.5 text-center">
-                                      <div className="text-[10px] text-gray-500 uppercase font-mono">Pace</div>
-                                      <div className="text-sm font-bold text-white">{profile.metrics.pacing}</div>
-                                  </div>
-                                  <div className="bg-gray-800 rounded p-1.5 text-center">
-                                      <div className="text-[10px] text-gray-500 uppercase font-mono">Casual</div>
-                                      <div className="text-sm font-bold text-white">{profile.metrics.informality}</div>
-                                  </div>
-                              </div>
-
-                              <button 
-                                onClick={() => handleSelectProfile(profile)}
-                                className="w-full py-2 bg-gray-800 hover:bg-neon-cyan hover:text-black text-white rounded-lg transition-colors text-sm font-bold flex items-center justify-center gap-2 mt-auto"
-                              >
-                                Load Model <Play className="w-3 h-3 fill-current" />
-                              </button>
-                            </div>
-                          ))}
-                       </div>
-                     </div>
-                   )
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* --- MODALS --- */}
-
-        {/* PROFILE DETAILS MODAL */}
-        {viewingProfile && (
-          <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-             <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-2xl p-6 shadow-2xl animate-in zoom-in-95 max-h-[90vh] overflow-y-auto custom-scrollbar">
-                <div className="flex justify-between items-start mb-6">
+            <div className="flex flex-col h-full">
+                <div className="flex justify-between items-end mb-6">
                     <div>
-                        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-                           <Brain className="w-6 h-6 text-neon-purple" />
-                           {viewingProfile.name}
-                        </h2>
-                        <p className="text-gray-400 text-sm mt-1">{viewingProfile.description}</p>
+                        <h2 className="text-2xl font-light text-white">Your Library</h2>
+                        <p className="text-gray-400 text-sm">Manage your saved style personas and structures.</p>
                     </div>
-                    <button onClick={() => setViewingProfile(null)} className="text-gray-500 hover:text-white p-1">
-                        <X className="w-6 h-6" />
-                    </button>
                 </div>
 
-                <div className="space-y-6">
-                    {/* Metrics Radar */}
-                    <div className="h-64 bg-gray-950/50 rounded-xl border border-gray-800 p-4">
-                        <h3 className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-wider">Style Metrics</h3>
-                        <StyleRadar metrics={viewingProfile.metrics} />
+                {isLibraryLoading ? (
+                    <div className="flex-1 flex items-center justify-center text-gray-500">
+                        <div className="flex flex-col items-center gap-2">
+                             <Loader2 className="w-8 h-8 animate-spin" />
+                             <p>Syncing with Cloud...</p>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="space-y-12 overflow-y-auto custom-scrollbar pb-10">
+                        {/* REORDER LOGIC: Categories with models go first */}
+                        {[...contentTypes].sort((a, b) => {
+                             const countA = savedProfiles.filter(p => (p.contentType || 'general') === a.id).length;
+                             const countB = savedProfiles.filter(p => (p.contentType || 'general') === b.id).length;
+                             // If one has items and other doesn't, prioritize the one with items
+                             if (countA > 0 && countB === 0) return -1;
+                             if (countA === 0 && countB > 0) return 1;
+                             // Otherwise keep original order
+                             return 0;
+                        }).map((type) => {
+                             // Filter profiles for this specific content type
+                             const groupProfiles = savedProfiles.filter(p => (p.contentType || 'general') === type.id);
+                             
+                             // Special case: 'general' always shows to display the "Add New" button
+                             const isGeneral = type.id === 'general';
+                             
+                             // If no profiles and not general, skip rendering this section
+                             if (groupProfiles.length === 0 && !isGeneral) return null;
+
+                             return (
+                                 <div key={type.id} className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                     <h3 className={`text-lg font-bold mb-4 flex items-center gap-2 uppercase tracking-wider ${isGeneral ? 'text-neon-cyan' : 'text-gray-400'}`}>
+                                         <type.icon className="w-5 h-5" /> 
+                                         {type.label}
+                                         <span className="text-xs bg-gray-800 text-gray-500 px-2 py-0.5 rounded ml-2 normal-case tracking-normal">
+                                             {groupProfiles.length}
+                                         </span>
+                                     </h3>
+                                     
+                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                         {/* SHOW "ADD NEW" BUTTON AS FIRST ITEM IN GENERAL SECTION */}
+                                         {isGeneral && (
+                                            <div 
+                                                onClick={() => setActiveTab(Tab.ANALYZE)}
+                                                className="border border-dashed border-gray-800 rounded-xl p-5 cursor-pointer hover:border-gray-600 hover:bg-gray-900/30 transition-all flex flex-col items-center justify-center gap-3 text-gray-500 hover:text-gray-300 min-h-[280px]"
+                                            >
+                                                 <div className="w-12 h-12 rounded-full bg-gray-900 border border-gray-800 flex items-center justify-center">
+                                                     <Plus className="w-6 h-6" />
+                                                 </div>
+                                                 <span className="font-bold text-sm">Analyze New Style</span>
+                                            </div>
+                                         )}
+
+                                         {/* PROFILE CARDS */}
+                                         {groupProfiles.map((profile) => (
+                                              <div 
+                                                 key={profile.id} 
+                                                 onClick={() => setPreviewProfileId(profile.id)} // Only highlight, don't use yet
+                                                 className={`bg-gray-900 border rounded-xl p-5 cursor-pointer transition-all hover:shadow-[0_0_20px_rgba(6,182,212,0.15)] group relative flex flex-col h-[280px]
+                                                 ${previewProfileId === profile.id ? 'border-neon-cyan shadow-[0_0_15px_rgba(6,182,212,0.2)]' : 'border-gray-800 hover:border-gray-600'}`}
+                                              >
+                                                 <div className="flex justify-between items-start mb-3">
+                                                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center bg-gray-950 border border-gray-800
+                                                        ${profile.contentType === 'travel' ? 'text-neon-green' : 'text-neon-cyan'}
+                                                    `}>
+                                                       {/* Icon based on content type */}
+                                                       {profile.contentType === 'travel' ? <Globe className="w-5 h-5"/> : <Brain className="w-5 h-5"/>}
+                                                    </div>
+                                                    <div className="flex gap-1">
+                                                        <button 
+                                                           onClick={(e) => { e.stopPropagation(); setViewingProfile(profile); }} 
+                                                           className="p-2 text-gray-500 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
+                                                           title="View Details"
+                                                        >
+                                                            <Info className="w-4 h-4" />
+                                                        </button>
+                                                        <button 
+                                                           onClick={(e) => { e.stopPropagation(); handleOpenRenameModal(profile); }} 
+                                                           className="p-2 text-gray-500 hover:text-white rounded-lg hover:bg-gray-800 transition-colors"
+                                                           title="Rename"
+                                                        >
+                                                            <Pencil className="w-4 h-4" />
+                                                        </button>
+                                                        <button 
+                                                           onClick={(e) => handleDeleteProfile(profile.id, e)} 
+                                                           className="p-2 text-gray-500 hover:text-red-500 rounded-lg hover:bg-gray-800 transition-colors"
+                                                           title="Delete"
+                                                        >
+                                                            <Trash2 className="w-4 h-4" />
+                                                        </button>
+                                                    </div>
+                                                 </div>
+                                                 
+                                                 <h3 className="font-bold text-lg text-white mb-1 truncate pr-2">{profile.name}</h3>
+                                                 <div className="flex items-center gap-2 mb-3">
+                                                     <span className="text-[10px] uppercase font-bold tracking-wider bg-gray-800 text-gray-400 px-2 py-0.5 rounded">
+                                                         {profile.contentType || 'General'}
+                                                     </span>
+                                                     {profile.id.startsWith('default') && <span className="text-[10px] text-gray-600 border border-gray-800 px-1 rounded">SYSTEM</span>}
+                                                 </div>
+                                                 
+                                                 <p className="text-sm text-gray-400 line-clamp-2 mb-4 flex-1">{profile.description}</p>
+                                                 
+                                                 <div className="mt-auto border-t border-gray-800 pt-3 flex justify-between items-center">
+                                                     <div className="flex flex-col">
+                                                         <span className="text-[10px] text-gray-500 font-mono">STYLE METRICS</span>
+                                                         <div className="flex gap-1 mt-1">
+                                                            {/* Mini bars representing metrics */}
+                                                            <div className="w-1 h-3 bg-gray-800 rounded-full overflow-hidden"><div className="w-full bg-neon-cyan" style={{height: `${profile.metrics.humor}%`}}></div></div>
+                                                            <div className="w-1 h-3 bg-gray-800 rounded-full overflow-hidden"><div className="w-full bg-neon-purple" style={{height: `${profile.metrics.logic}%`}}></div></div>
+                                                            <div className="w-1 h-3 bg-gray-800 rounded-full overflow-hidden"><div className="w-full bg-neon-green" style={{height: `${profile.metrics.pacing}%`}}></div></div>
+                                                         </div>
+                                                     </div>
+                                                     <button 
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleSelectProfile(profile);
+                                                        }}
+                                                        className={`text-xs font-bold flex items-center gap-1 group-hover:translate-x-1 transition-transform border px-2 py-1 rounded hover:bg-gray-800 ${currentProfile?.id === profile.id ? 'text-neon-cyan border-neon-cyan/50' : 'text-gray-500 group-hover:text-white border-transparent'}`}
+                                                     >
+                                                         {currentProfile?.id === profile.id ? 'Selected' : 'Use Model'} <Play className="w-3 h-3" />
+                                                     </button>
+                                                 </div>
+                                              </div>
+                                         ))}
+                                     </div>
+                                 </div>
+                             );
+                        })}
+                    </div>
+                )}
+            </div>
+        )}
+
+      </main>
+
+      {/* --- MODALS --- */}
+
+      {/* 1. API KEY MODAL */}
+      {showApiKeyModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 max-w-lg w-full shadow-2xl">
+                <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                        <Key className="w-5 h-5 text-neon-green" /> API Keys
+                    </h3>
+                    <button onClick={() => setShowApiKeyModal(false)} className="text-gray-500 hover:text-white"><X className="w-5 h-5" /></button>
+                </div>
+                <p className="text-sm text-gray-400 mb-4">
+                    Manage your Google Gemini API Keys. Keys are rotated automatically if one hits a rate limit.
+                    <a 
+                        href="https://aistudio.google.com/app/apikey" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-neon-cyan hover:underline ml-1 font-medium"
+                    >
+                        Get API Key <ExternalLink className="w-3 h-3" />
+                    </a>
+                </p>
+                <div className="space-y-3 mb-6 max-h-[200px] overflow-y-auto custom-scrollbar">
+                    {userApiKeys.map((k, i) => (
+                        <div key={i} className="flex items-center justify-between bg-gray-950 p-3 rounded border border-gray-800">
+                            <div className="flex items-center gap-2 overflow-hidden">
+                                <span className={`w-2 h-2 rounded-full ${keyStatuses[k] === 'expired' ? 'bg-red-500' : keyStatuses[k] === 'active' ? 'bg-green-500' : 'bg-gray-500'}`}></span>
+                                <code className="text-xs text-gray-300 font-mono truncate">...{k.slice(-6)}</code>
+                            </div>
+                            <button onClick={() => handleRemoveApiKey(i)} className="text-gray-600 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+                    ))}
+                    {userApiKeys.length === 0 && <p className="text-xs text-yellow-500 text-center">No keys added. App will not function.</p>}
+                </div>
+                <div className="flex gap-2">
+                    <input 
+                        type="text" 
+                        placeholder="Paste Gemini API Key (starts with AIza...)" 
+                        className="flex-1 bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-white focus:border-neon-green focus:outline-none"
+                        value={tempApiKeyInput}
+                        onChange={(e) => setTempApiKeyInput(e.target.value)}
+                    />
+                    <button onClick={handleAddApiKey} disabled={!tempApiKeyInput.trim()} className="bg-neon-green text-black font-bold px-4 py-2 rounded-lg text-sm hover:bg-green-500 disabled:opacity-50">Add</button>
+                </div>
+            </div>
+        </div>
+      )}
+
+      {/* 2. SAVE/RENAME PROFILE MODAL */}
+      {modalState.isOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 max-w-md w-full shadow-2xl">
+                <h3 className="text-xl font-bold text-white mb-4">{modalState.mode === 'save' ? 'Save New Style' : 'Rename Model'}</h3>
+                <div className="space-y-4">
+                    <div>
+                        <label className="text-xs text-gray-500 font-bold mb-1 block">NAME</label>
+                        <input 
+                            type="text" 
+                            className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:border-neon-cyan focus:outline-none"
+                            value={modalState.inputValue}
+                            onChange={(e) => setModalState(prev => ({ ...prev, inputValue: e.target.value }))}
+                            placeholder="e.g. The Tech Optimist"
+                        />
+                    </div>
+                    <div>
+                        <label className="text-xs text-gray-500 font-bold mb-1 block">CATEGORY</label>
+                        <select 
+                            className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:border-neon-cyan focus:outline-none"
+                            value={modalState.inputContentType}
+                            onChange={(e) => setModalState(prev => ({ ...prev, inputContentType: e.target.value as ContentType }))}
+                        >
+                            {contentTypes.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </select>
+                    </div>
+                    <div className="flex justify-end gap-3 pt-2">
+                        <button onClick={() => setModalState(prev => ({ ...prev, isOpen: false }))} className="px-4 py-2 text-gray-400 hover:text-white">Cancel</button>
+                        <button onClick={handleConfirmModal} disabled={!modalState.inputValue.trim() || modalState.isSaving} className="px-6 py-2 bg-neon-cyan text-black font-bold rounded-lg hover:bg-cyan-400 disabled:opacity-50 flex items-center gap-2">
+                            {modalState.isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                            {modalState.mode === 'save' ? 'Save to Library' : 'Update Model'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+      )}
+
+      {/* 3. STRUCTURE MODAL */}
+      {showStructureModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 max-w-2xl w-full shadow-2xl max-h-[90vh] flex flex-col">
+                <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                        <Grid className="w-5 h-5 text-neon-green" /> {editingStructureId ? 'Edit Structure' : 'New Structure Template'}
+                    </h3>
+                    <button onClick={() => setShowStructureModal(false)} className="text-gray-500 hover:text-white"><X className="w-5 h-5" /></button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 space-y-6">
+                    <div className="space-y-4">
+                        <div>
+                            <label className="text-xs text-gray-500 font-bold mb-1 block">TEMPLATE NAME</label>
+                            <input 
+                                type="text" 
+                                className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:border-neon-green focus:outline-none"
+                                value={newStructureName}
+                                onChange={(e) => setNewStructureName(e.target.value)}
+                                placeholder="e.g. Viral LinkedIn Post"
+                            />
+                        </div>
+                        <div>
+                            <label className="text-xs text-gray-500 font-bold mb-1 block">DESCRIPTION</label>
+                            <input 
+                                type="text" 
+                                className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:border-neon-green focus:outline-none"
+                                value={newStructureDesc}
+                                onChange={(e) => setNewStructureDesc(e.target.value)}
+                                placeholder="Short description of this format..."
+                            />
+                        </div>
                     </div>
 
-                    {/* NEW: STRUCTURAL PATTERNS DISPLAY */}
-                    {viewingProfile.structuralPatterns && (
-                        <div>
-                           <h3 className="text-sm font-bold text-neon-cyan mb-3 flex items-center gap-2">
-                               <Anchor className="w-4 h-4" /> STRUCTURAL ANCHORS
-                           </h3>
-                           <div className="bg-gray-950 border border-gray-800 rounded-lg p-4 space-y-4">
-                                <div>
-                                   <span className="text-xs text-gray-500 font-mono block mb-1">OPENING HABITS</span>
-                                   <p className="text-sm text-gray-300 mb-2 italic">"{viewingProfile.structuralPatterns.introHabits}"</p>
-                                   <div className="flex flex-wrap gap-2">
-                                       {viewingProfile.structuralPatterns.introPhrases.map((p, i) => (
-                                           <span key={i} className="text-xs bg-gray-800 text-neon-cyan px-2 py-1 rounded border border-gray-700">
-                                               {p}
-                                           </span>
-                                       ))}
-                                   </div>
-                                </div>
-                                
-                                <div className="border-t border-gray-800 pt-3">
-                                   <span className="text-xs text-gray-500 font-mono block mb-1">TRANSITION PHRASES</span>
-                                   <div className="flex flex-wrap gap-2">
-                                       {viewingProfile.structuralPatterns.transitionPhrases.map((p, i) => (
-                                           <span key={i} className="text-xs bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">
-                                               {p}
-                                           </span>
-                                       ))}
-                                   </div>
-                                </div>
-
-                                <div className="border-t border-gray-800 pt-3">
-                                   <span className="text-xs text-gray-500 font-mono block mb-1">CLOSING HABITS</span>
-                                   <p className="text-sm text-gray-300 mb-2 italic">"{viewingProfile.structuralPatterns.outroHabits}"</p>
-                                   <div className="flex flex-wrap gap-2">
-                                       {viewingProfile.structuralPatterns.outroPhrases.map((p, i) => (
-                                           <span key={i} className="text-xs bg-gray-800 text-neon-purple px-2 py-1 rounded border border-gray-700">
-                                               {p}
-                                           </span>
-                                       ))}
-                                   </div>
-                                </div>
-                           </div>
+                    <div>
+                        <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs text-gray-500 font-bold block">SECTIONS FLOW</label>
+                            <button onClick={handleAddStructureSection} className="text-xs flex items-center gap-1 text-neon-green hover:underline">
+                                <PlusCircle className="w-3 h-3" /> Add Section
+                            </button>
                         </div>
-                    )}
-
-                    {/* QUANTITATIVE ANALYSIS */}
-                    {viewingProfile.quantitativeAnalysis && (
-                        <div>
-                           <h3 className="text-sm font-bold text-neon-green mb-3 flex items-center gap-2">
-                               <Ruler className="w-4 h-4" /> PHYSICAL STRUCTURE
-                           </h3>
-                           <div className="bg-gray-950 border border-gray-800 rounded-lg p-4 space-y-4">
-                               <div className="grid grid-cols-3 gap-2 text-center pb-4 border-b border-gray-800">
-                                   <div>
-                                       <span className="block text-xs text-gray-500">Total Words</span>
-                                       <span className="text-lg font-bold text-white">{viewingProfile.quantitativeAnalysis.totalWordCount}</span>
-                                   </div>
-                                   <div>
-                                       <span className="block text-xs text-gray-500">Paragraphs</span>
-                                       <span className="text-lg font-bold text-white">{viewingProfile.quantitativeAnalysis.paragraphCount}</span>
-                                   </div>
-                                   <div>
-                                       <span className="block text-xs text-gray-500">Avg Words/Para</span>
-                                       <span className="text-lg font-bold text-white">{viewingProfile.quantitativeAnalysis.averageWordsPerParagraph}</span>
-                                   </div>
-                               </div>
-                               <div>
-                                   <span className="text-xs text-gray-500 block mb-2 font-mono uppercase">Structural Skeleton</span>
-                                   <div className="space-y-2">
-                                       {viewingProfile.quantitativeAnalysis.structureSkeleton.map((sec, idx) => (
-                                           <div key={idx} className="flex justify-between items-center p-2 bg-gray-800/30 rounded border border-gray-800/50">
-                                               <div>
-                                                   <span className="text-sm font-bold text-neon-green">{sec.sectionName}</span>
-                                                   <span className="text-xs text-gray-500 ml-2">({sec.purpose})</span>
-                                               </div>
-                                               <span className="text-xs font-mono text-white">{sec.estimatedWords} words</span>
-                                           </div>
-                                       ))}
-                                   </div>
-                               </div>
-                           </div>
+                        <div className="space-y-3">
+                            {newStructureSections.map((section, index) => (
+                                <div 
+                                    key={section.id} 
+                                    draggable 
+                                    onDragStart={() => handleDragStart(index)}
+                                    onDragEnter={() => handleDragEnter(index)}
+                                    onDragEnd={handleDragEnd}
+                                    onDragOver={(e) => e.preventDefault()}
+                                    className={`bg-gray-950 border border-gray-800 rounded-lg p-3 flex gap-3 items-start group hover:border-gray-600 transition-colors ${draggedSectionIndex === index ? 'opacity-50 border-dashed border-neon-green' : ''}`}
+                                >
+                                    <div className="mt-2 cursor-grab text-gray-600 hover:text-white"><MoveVertical className="w-4 h-4" /></div>
+                                    <div className="flex-1 flex flex-col gap-2">
+                                        <div className="flex gap-3">
+                                            <div className="flex-1">
+                                                <label className="text-[10px] text-gray-500 font-bold mb-1 block">SECTION NAME</label>
+                                                <input 
+                                                    type="text" 
+                                                    placeholder="e.g. The Hook" 
+                                                    className="w-full bg-gray-900 border border-gray-800 rounded px-2 py-1.5 text-sm text-white focus:border-neon-green focus:outline-none"
+                                                    value={section.name}
+                                                    onChange={(e) => handleUpdateSection(section.id, 'name', e.target.value)}
+                                                />
+                                            </div>
+                                            <div className="w-32">
+                                                <label className="text-[10px] text-gray-500 font-bold mb-1 block">WORD COUNT</label>
+                                                <div className="relative">
+                                                    <input 
+                                                        type="number" 
+                                                        placeholder="Words" 
+                                                        className="w-full bg-gray-900 border border-gray-800 rounded px-2 py-1.5 text-sm text-white focus:border-neon-green focus:outline-none"
+                                                        value={section.estimatedWords}
+                                                        onChange={(e) => handleUpdateSection(section.id, 'estimatedWords', parseInt(e.target.value) || 0)}
+                                                    />
+                                                    <span className="absolute right-2 top-1.5 text-xs text-gray-600">w</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] text-gray-500 font-bold mb-1 block">CONTENT INSTRUCTION (Prompt for this section)</label>
+                                            <textarea 
+                                                placeholder="What should the AI write here? (e.g. 'Tell a personal story', 'List 3 shocking stats', 'Ask a rhetorical question')" 
+                                                className="w-full bg-gray-900 border border-gray-800 rounded px-2 py-2 text-sm text-white focus:border-neon-green focus:outline-none resize-y min-h-[60px]"
+                                                rows={2}
+                                                value={section.instruction}
+                                                onChange={(e) => handleUpdateSection(section.id, 'instruction', e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
+                                    <button onClick={() => handleRemoveSection(section.id)} className="mt-1.5 text-gray-600 hover:text-red-500"><X className="w-4 h-4" /></button>
+                                </div>
+                            ))}
                         </div>
-                    )}
+                    </div>
+                </div>
 
-                    {/* Style DNA Grid */}
-                    {viewingProfile.styleDNA && (
-                        <div>
-                           <h3 className="text-sm font-bold text-neon-purple mb-3 flex items-center gap-2">
-                               <Activity className="w-4 h-4" /> FORENSIC DNA ANALYSIS
-                           </h3>
-                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="bg-gray-800/30 p-3 rounded border border-gray-800">
-                                    <span className="text-xs text-gray-500 font-mono block mb-1">COGNITIVE PATTERN</span>
-                                    <p className="text-sm text-gray-200">{viewingProfile.styleDNA.cognitivePattern}</p>
-                                </div>
-                                <div className="bg-gray-800/30 p-3 rounded border border-gray-800">
-                                    <span className="text-xs text-gray-500 font-mono block mb-1">SYNTAX PATTERN</span>
-                                    <p className="text-sm text-gray-200">{viewingProfile.styleDNA.syntaxPattern}</p>
-                                </div>
-                                <div className="bg-gray-800/30 p-3 rounded border border-gray-800">
-                                    <span className="text-xs text-gray-500 font-mono block mb-1">LEXICAL SIGNATURE</span>
-                                    <p className="text-sm text-gray-200">{viewingProfile.styleDNA.lexicalSignature}</p>
-                                </div>
-                                <div className="bg-gray-800/30 p-3 rounded border border-gray-800">
-                                    <span className="text-xs text-gray-500 font-mono block mb-1">RHETORICAL DEVICES</span>
-                                    <p className="text-sm text-gray-200">{viewingProfile.styleDNA.rhetoricalDevices}</p>
-                                </div>
-                                <div className="bg-gray-800/30 p-3 rounded border border-gray-800">
-                                    <span className="text-xs text-gray-500 font-mono block mb-1">VERBAL TICS & IMPERFECTIONS</span>
-                                    <p className="text-sm text-gray-200">{viewingProfile.styleDNA.verbalTics || "None detected"}</p>
-                                </div>
-                                <div className="bg-gray-800/30 p-3 rounded border border-gray-800">
-                                    <span className="text-xs text-gray-500 font-mono block mb-1">EMOTIONAL CURVE</span>
-                                    <p className="text-sm text-gray-200">{viewingProfile.styleDNA.emotionalCurve}</p>
-                                </div>
-                           </div>
+                <div className="pt-4 mt-4 border-t border-gray-800 flex justify-end gap-3">
+                    <button onClick={() => setShowStructureModal(false)} className="px-4 py-2 text-gray-400 hover:text-white">Cancel</button>
+                    <button onClick={handleSaveStructure} disabled={isSavingStructure} className="px-6 py-2 bg-neon-green text-black font-bold rounded-lg hover:bg-green-500 disabled:opacity-50 flex items-center gap-2">
+                        {isSavingStructure && <Loader2 className="w-4 h-4 animate-spin" />}
+                        Save Structure
+                    </button>
+                </div>
+            </div>
+        </div>
+      )}
+
+      {/* 4. VIEW DETAILS MODAL */}
+      {viewingProfile && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-0 max-w-3xl w-full shadow-2xl max-h-[90vh] flex flex-col overflow-hidden">
+                {/* Header */}
+                <div className="p-6 border-b border-gray-800 flex justify-between items-start bg-gray-900/50">
+                    <div>
+                        <div className="flex items-center gap-3 mb-2">
+                             <div className={`w-10 h-10 rounded-lg flex items-center justify-center bg-gray-950 border border-gray-800
+                                ${viewingProfile.contentType === 'travel' ? 'text-neon-green' : 'text-neon-cyan'}`}>
+                                {viewingProfile.contentType === 'travel' ? <Globe className="w-5 h-5"/> : <Brain className="w-5 h-5"/>}
+                             </div>
+                             <div>
+                                 <h3 className="text-xl font-bold text-white">{viewingProfile.name}</h3>
+                                 <span className="text-xs uppercase font-bold tracking-wider text-gray-500 bg-gray-950 px-2 py-0.5 rounded border border-gray-800">
+                                     {viewingProfile.contentType || 'General'}
+                                 </span>
+                             </div>
                         </div>
-                    )}
+                    </div>
+                    <button onClick={() => setViewingProfile(null)} className="text-gray-500 hover:text-white p-2 hover:bg-gray-800 rounded transition-colors"><X className="w-6 h-6" /></button>
+                </div>
 
-                    {/* Signature Phrases */}
-                     <div>
-                        <h3 className="text-sm font-bold text-gray-400 mb-2">Signature Phrases</h3>
+                {/* Body */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-8">
+                    
+                    {/* Description */}
+                    <div className="bg-gray-950/50 p-4 rounded-xl border border-gray-800/50">
+                        <p className="text-gray-300 italic">"{viewingProfile.description}"</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        {/* Metrics */}
+                        <div>
+                            <h4 className="text-sm font-bold text-gray-500 uppercase mb-4 flex items-center gap-2"><Activity className="w-4 h-4"/> Style Metrics</h4>
+                            <div className="bg-gray-950 border border-gray-800 rounded-xl p-4 h-64">
+                                <StyleRadar metrics={viewingProfile.metrics} />
+                            </div>
+                        </div>
+
+                        {/* DNA */}
+                        <div className="space-y-4">
+                             <h4 className="text-sm font-bold text-gray-500 uppercase mb-4 flex items-center gap-2"><Brain className="w-4 h-4"/> Cognitive DNA</h4>
+                             
+                             <div className="space-y-3">
+                                 <div>
+                                     <span className="text-xs text-neon-cyan font-bold block mb-1">COGNITIVE PATTERN</span>
+                                     <p className="text-sm text-gray-300">{viewingProfile.styleDNA?.cognitivePattern || "N/A"}</p>
+                                 </div>
+                                 <div>
+                                     <span className="text-xs text-neon-purple font-bold block mb-1">VERBAL TICS</span>
+                                     <p className="text-sm text-gray-300">{viewingProfile.styleDNA?.verbalTics || "None detected."}</p>
+                                 </div>
+                                 <div>
+                                     <span className="text-xs text-neon-green font-bold block mb-1">TONE</span>
+                                     <p className="text-sm text-gray-300">{viewingProfile.toneDescription}</p>
+                                 </div>
+                             </div>
+                        </div>
+                    </div>
+
+                    {/* Phrases */}
+                    <div>
+                        <h4 className="text-sm font-bold text-gray-500 uppercase mb-4 flex items-center gap-2"><Quote className="w-4 h-4"/> Signature Phrases</h4>
                         <div className="flex flex-wrap gap-2">
-                            {viewingProfile.signaturePhrases.map((phrase, idx) => (
-                                <span key={idx} className="bg-gray-800 text-gray-300 px-2 py-1 rounded text-xs border border-gray-700">
+                            {viewingProfile.signaturePhrases.map((phrase, i) => (
+                                <span key={i} className="px-3 py-1.5 bg-gray-800 text-gray-200 text-sm rounded-lg border border-gray-700">
                                     "{phrase}"
                                 </span>
                             ))}
                         </div>
-                     </div>
-                </div>
-             </div>
-          </div>
-        )}
+                    </div>
 
-        {/* RENAME / SAVE MODAL */}
-        {modalState.isOpen && (
-          <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md p-6 shadow-2xl animate-in zoom-in-95 duration-200">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold text-white">
-                  {modalState.mode === 'save' ? 'Save Model' : 'Edit Model Details'}
-                </h3>
-                <button onClick={() => setModalState(prev => ({...prev, isOpen: false}))} className="text-gray-500 hover:text-white transition-colors"><X className="w-5 h-5" /></button>
-              </div>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="text-xs text-gray-400 font-mono mb-1 block">MODEL NAME</label>
-                  <input type="text" value={modalState.inputValue} onChange={(e) => setModalState(prev => ({...prev, inputValue: e.target.value}))} className="w-full bg-gray-950 border border-gray-800 rounded-lg p-3 text-white focus:outline-none focus:border-neon-cyan" placeholder="e.g., The Happy Traveler" autoFocus />
-                </div>
-  
-                <div>
-                  <label className="text-xs text-gray-400 font-mono mb-2 block">FOLDER / CATEGORY</label>
-                  <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto custom-scrollbar">
-                    {contentTypes.map(type => (
-                      <button key={type.id} onClick={() => setModalState(prev => ({...prev, inputContentType: type.id}))} className={`flex items-center gap-2 p-2 rounded-lg border text-xs text-left transition-all ${modalState.inputContentType === type.id ? 'bg-neon-cyan/10 border-neon-cyan text-white ring-1 ring-neon-cyan/50' : 'bg-gray-950 border-gray-800 text-gray-400 hover:bg-gray-900 hover:border-gray-600'}`}>
-                        <type.icon className={`w-3 h-3 ${modalState.inputContentType === type.id ? 'text-neon-cyan' : ''}`} />
-                        {type.label}
-                      </button>
-                    ))}
-                  </div>
+                     {/* Structural Patterns */}
+                     {viewingProfile.structuralPatterns && (
+                        <div>
+                            <h4 className="text-sm font-bold text-gray-500 uppercase mb-4 flex items-center gap-2"><LayoutGrid className="w-4 h-4"/> Structure Habits</h4>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="bg-gray-950 p-4 rounded-xl border border-gray-800">
+                                    <span className="text-xs text-gray-500 font-bold block mb-2">INTRO HABITS</span>
+                                    <p className="text-sm text-gray-300 mb-2">{viewingProfile.structuralPatterns.introHabits}</p>
+                                    <div className="flex flex-wrap gap-1">
+                                        {viewingProfile.structuralPatterns.introPhrases.map((p,i) => <span key={i} className="text-xs text-gray-500 bg-gray-900 px-1.5 py-0.5 rounded">"{p}"</span>)}
+                                    </div>
+                                </div>
+                                <div className="bg-gray-950 p-4 rounded-xl border border-gray-800">
+                                    <span className="text-xs text-gray-500 font-bold block mb-2">OUTRO HABITS</span>
+                                    <p className="text-sm text-gray-300 mb-2">{viewingProfile.structuralPatterns.outroHabits}</p>
+                                    <div className="flex flex-wrap gap-1">
+                                        {viewingProfile.structuralPatterns.outroPhrases.map((p,i) => <span key={i} className="text-xs text-gray-500 bg-gray-900 px-1.5 py-0.5 rounded">"{p}"</span>)}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                     )}
+
                 </div>
                 
-                <div className="flex gap-3 justify-end pt-4 border-t border-gray-800 mt-4">
-                  <button onClick={() => setModalState(prev => ({...prev, isOpen: false}))} className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors" disabled={modalState.isSaving}>Cancel</button>
-                  <button onClick={handleConfirmModal} disabled={!modalState.inputValue.trim() || modalState.isSaving} className="flex items-center gap-2 px-6 py-2 bg-neon-cyan hover:bg-cyan-400 text-black font-bold rounded-lg transition-colors disabled:opacity-50">
-                    {modalState.isSaving ? <Loader2 className="w-4 h-4 animate-spin"/> : <Check className="w-4 h-4" />}
-                    {modalState.mode === 'save' ? 'Save to Library' : 'Update'}
-                  </button>
+                {/* Footer */}
+                <div className="p-4 border-t border-gray-800 bg-gray-900/50 flex justify-end">
+                     <button onClick={() => setViewingProfile(null)} className="px-6 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg transition-colors font-medium">Close</button>
                 </div>
-              </div>
             </div>
-          </div>
-        )}
+        </div>
+      )}
 
-        {/* API KEY CONFIG MODAL */}
-        {showApiKeyModal && (
-          <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-             <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-lg p-6 shadow-2xl animate-in zoom-in-95">
-                <div className="flex justify-between items-center mb-6">
-                    <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center border border-gray-700">
-                           <Zap className="w-5 h-5 text-neon-green" />
-                        </div>
-                        <div>
-                            <h2 className="text-xl font-bold text-white">Configure AI Engine</h2>
-                            <p className="text-xs text-gray-500">Manage your Google Gemini API Keys</p>
-                        </div>
-                    </div>
-                    <button onClick={() => setShowApiKeyModal(false)} className="text-gray-500 hover:text-white transition-colors">
-                        <X className="w-6 h-6" />
-                    </button>
-                </div>
-
-                <div className="space-y-4">
-                   <div className="flex justify-between items-start gap-2">
-                      <p className="text-gray-400 text-sm">
-                        Add multiple keys to enable <b>Key Rotation</b>. Don't have a key? <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-neon-cyan hover:underline inline-flex items-center gap-1 font-bold">Get one here <ExternalLink className="w-3 h-3"/></a>.
-                      </p>
-                   </div>
-                  
-                  {/* Key Input */}
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      className="flex-1 bg-gray-950 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-neon-green"
-                      placeholder="Paste Gemini API Key here..."
-                      value={tempApiKeyInput}
-                      onChange={(e) => setTempApiKeyInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleAddApiKey()}
-                    />
-                    <button 
-                        onClick={handleAddApiKey}
-                        disabled={!tempApiKeyInput.trim()}
-                        className="bg-gray-800 hover:bg-neon-green hover:text-black text-neon-green border border-gray-700 hover:border-neon-green rounded-xl px-4 py-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <Plus className="w-6 h-6" />
-                    </button>
-                  </div>
-
-                  {/* Key List */}
-                  <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4 min-h-[120px] max-h-[200px] overflow-y-auto custom-scrollbar">
-                      {userApiKeys.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center text-gray-600 gap-2">
-                            <Key className="w-8 h-8 opacity-20" />
-                            <p className="text-xs">No keys added yet.</p>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                            {userApiKeys.map((k, idx) => {
-                                const status = keyStatuses[k] || 'ready';
-                                return (
-                                <div key={idx} className="flex justify-between items-center bg-gray-900 p-2 rounded-lg border border-gray-800">
-                                    <div className="flex items-center gap-3">
-                                        <div className="flex flex-col">
-                                            <code className="text-xs text-gray-300 font-mono">
-                                                ••••• {k.slice(-6)}
-                                            </code>
-                                        </div>
-                                        {/* STATUS BADGES */}
-                                        {status === 'active' && (
-                                            <span className="flex items-center gap-1 text-[10px] bg-green-900/30 text-green-400 px-1.5 py-0.5 rounded border border-green-800">
-                                                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-                                                Start
-                                            </span>
-                                        )}
-                                        {status === 'expired' && (
-                                            <span className="flex items-center gap-1 text-[10px] bg-red-900/30 text-red-400 px-1.5 py-0.5 rounded border border-red-800">
-                                                <Circle className="w-1.5 h-1.5 fill-current" />
-                                                Expired
-                                            </span>
-                                        )}
-                                    </div>
-                                    <button onClick={() => handleRemoveApiKey(idx)} className="text-gray-500 hover:text-red-500 p-1">
-                                        <X className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            )})}
-                        </div>
-                      )}
-                  </div>
-                  
-                  {userApiKeys.length === 0 && (
-                      <div className="flex items-center gap-2 p-3 bg-yellow-900/20 border border-yellow-800/50 rounded-lg text-yellow-500 text-xs">
-                          <AlertTriangle className="w-4 h-4" />
-                          <span>You must add at least one key to use Analyze/Generate features.</span>
-                      </div>
-                  )}
-
-                  <button
-                    onClick={() => setShowApiKeyModal(false)}
-                    className="w-full mt-2 py-3 border border-transparent text-sm font-bold rounded-xl text-black bg-neon-green hover:bg-green-500 transition-all"
-                  >
-                    Done
-                  </button>
-                </div>
-             </div>
-          </div>
-        )}
-
-      </main>
     </div>
   );
 };
