@@ -374,7 +374,7 @@ const getMetricTuningInstructions = (metrics: StyleMetrics): string[] => {
 
 /**
  * Generates a new script based on a specific style profile.
- * UPDATED: Now uses STRICT JSON INPUT to separate CUSTOM_STRUCTURE vs AUTO_DNA logic.
+ * UPDATED: Includes word count inflation to ensure LLM output meets target length.
  */
 export const generateScript = async (
   apiKeys: string[],
@@ -383,60 +383,76 @@ export const generateScript = async (
   contentType: ContentType = 'general',
   selectedLocations: LocationSuggestion[] = [],
   targetLength: number = 250,
-  creativityLevel: number = 1.35, // NEW: Temperature control
-  customStructure: WritingStructure | null = null, // NEW: Custom Structure Override
+  creativityLevel: number = 1.35, 
+  customStructure: WritingStructure | null = null, 
   onStatusUpdate?: (key: string, status: 'active' | 'expired') => void
 ): Promise<string> => {
     return executeWithKeyRotation(apiKeys, async (ai) => {
         
-        // 1. DETERMINE MODE & CALCULATE BLUEPRINT
+        // 1. DETERMINE MODE & CALCULATE BLUEPRINT WITH INFLATION
         const MODE = customStructure ? "CUSTOM_STRUCTURE" : "AUTO_DNA";
         let blueprint: any[] = [];
         let totalEstimatedWords = 0;
 
+        // INFLATION FACTOR:
+        // LLMs tend to be concise and undercut word counts by 20-30% on long texts.
+        // We artificially inflate the target requested from the LLM to compensate.
+        // e.g. User wants 2000 -> We ask for ~2500 -> Model produces ~2100.
+        const INFLATION_FACTOR = targetLength > 800 ? 1.3 : 1.1; 
+        const inflatedTotalTarget = Math.round(targetLength * INFLATION_FACTOR);
+
         if (customStructure) {
             // CASE A: CUSTOM STRUCTURE MODE
-            // Calculate total from Custom Structure
-            totalEstimatedWords = customStructure.sections.reduce((sum, sec) => sum + (sec.estimatedWords || 100), 0);
+            // Scale the custom structure sections to hit the INFLATED target
+            const rawStructureTotal = customStructure.sections.reduce((sum, sec) => sum + (sec.estimatedWords || 100), 0);
+            
+            // If the user's structure sum is vastly different from targetLength (which comes from UI slider or sum),
+            // we respect the structure's proportions but scale to the inflated target.
+            const scale = (rawStructureTotal > 0) ? (inflatedTotalTarget / rawStructureTotal) : 1;
+            
+            totalEstimatedWords = inflatedTotalTarget;
             
             blueprint = customStructure.sections.map(sec => ({
                 sectionName: sec.name,
                 intent: sec.instruction,
-                wordTarget: sec.estimatedWords || 100,
-                // Inflation advice for longer sections
-                instruction: sec.estimatedWords && sec.estimatedWords > 150 ? "DEEP DIVE REQUIRED. Elaborate extensively." : "Concise."
+                wordTarget: Math.round((sec.estimatedWords || 100) * scale),
+                // Add specific expansion instruction for every section
+                instruction: "EXPAND THIS SECTION. Provide detailed examples, context, and deep analysis to fill the word count."
             }));
         } else if (profile.quantitativeAnalysis && profile.quantitativeAnalysis.structureSkeleton) {
             // CASE B: AUTO DNA MODE
-            // Scale profile skeleton to user's targetLength
+            // Scale profile skeleton to INFLATED target
             const originalTotal = profile.quantitativeAnalysis.totalWordCount || 1000;
-            const scaleFactor = targetLength / originalTotal;
-            totalEstimatedWords = targetLength;
+            const scaleFactor = inflatedTotalTarget / originalTotal;
+            totalEstimatedWords = inflatedTotalTarget;
             
             blueprint = profile.quantitativeAnalysis.structureSkeleton.map(sec => ({
                 sectionName: sec.sectionName,
                 intent: sec.purpose,
-                // Ensure no section is too small (min 20 words)
-                wordTarget: Math.max(20, Math.round(sec.estimatedWords * scaleFactor))
+                // Ensure no section is too small (min 50 words)
+                wordTarget: Math.max(50, Math.round(sec.estimatedWords * scaleFactor))
             }));
         } else {
             // FALLBACK (No skeletal data)
-            totalEstimatedWords = targetLength;
+            totalEstimatedWords = inflatedTotalTarget;
             blueprint = [
-                { sectionName: "Content", intent: "Write a comprehensive piece about the topic.", wordTarget: targetLength }
+                { sectionName: "Content", intent: "Write a comprehensive and deeply detailed piece about the topic.", wordTarget: inflatedTotalTarget }
             ];
         }
 
-        const absoluteMinWords = Math.max(50, totalEstimatedWords - 50);
+        // We set the absolute minimum to the user's original request (not the inflated one)
+        const absoluteMinWords = targetLength;
 
-        // 2. CONSTRUCT PROMPT INPUT OBJECT (Simulating the JSON Input)
+        // 2. CONSTRUCT PROMPT INPUT OBJECT
         const inputPayload = {
             mode: MODE,
             task: `Write a ${contentType} about: "${topic}"`,
             constraints: {
-                totalTargetWords: totalEstimatedWords,
-                absoluteMinWords: absoluteMinWords,
-                tolerance: "+/- 50 words",
+                // We ask for the INFLATED amount as the "Goal"
+                targetWordCountGoal: totalEstimatedWords,
+                // We set the user's actual target as the strict MINIMUM
+                minimumRequiredWords: absoluteMinWords,
+                strictness: "HIGH. Do not under-write.",
                 language: "ENGLISH",
                 creativity: creativityLevel
             },
@@ -446,8 +462,6 @@ export const generateScript = async (
                 tone: profile.toneDescription,
                 metrics: profile.metrics,
                 styleDNA: profile.styleDNA,
-                // CHANGED: Always pass structuralPatterns (Anchors), even in custom mode. 
-                // The system instruction will decide how to use them.
                 structuralAnchors: profile.structuralPatterns,
                 samples: profile.styleSamples
             },
@@ -460,41 +474,37 @@ export const generateScript = async (
         // 3. SYSTEM INSTRUCTION (STRICT RULES)
         const systemInstruction = `
             You must follow the JSON input strictly. 
-            Do not improvise, do not override constraints, and never modify the provided structure.
+            
+            **LENGTH ENFORCEMENT PROTOCOL:**
+            - **You have a tendency to be too concise. This is forbidden.**
+            - The user requires a LONG-FORM output of at least ${absoluteMinWords} words.
+            - To achieve this, you must **EXPAND** every single point.
+            - Never summarize. Always elaborate.
+            - Use examples, anecdotes, data points, and counter-arguments to flesh out each section.
+            - If a section seems finished but the word count is low, add a "Deep Dive" or "Context" subsection.
 
             PROCESSING RULES:
             1. If mode = "CUSTOM_STRUCTURE":
-                - **STRUCTURE (The Skeleton):** Follow the user's blueprint exactly. Section names, order, and word counts are law.
-                - **STYLE (The Soul):** Apply ALL profile metrics, tone, DNA, and verbal tics.
-                - **ANCHORS (The Habit):** ADAPT the profile's 'structuralAnchors' (Intro phrases, Outro phrases) to fit the custom structure.
-                   * Example: If the profile always opens with "Hey guys!", try to put that in the first custom section, unless it completely contradicts the intent.
-                   * Example: If the profile always ends with "Peace out", try to put that in the final custom section.
-                   * Do not strip personality. Only change the organizational flow.
+                - **STRUCTURE:** Follow the blueprint exactly.
+                - **STYLE:** Apply ALL profile metrics, tone, DNA, and verbal tics.
+                - **ANCHORS:** ADAPT the profile's 'structuralAnchors' (Intro/Outro phrases) to fit.
 
             2. If mode = "AUTO_DNA":
-                - Ignore the user blueprint entirely.
-                - Use the profile’s structural skeleton as the only structure.
-                - Scale each skeleton section according to constraints.targetLength.
-                - Apply ALL profile anchors strictly:
-                    * Required intro phrases
-                    * Required transition habits
-                    * Required outro phrases
+                - Use the provided blueprint skeleton.
+                - Scale each section to meet the word count goal of ${totalEstimatedWords} words.
+                - Apply ALL profile anchors strictly (Intro phrases, Transition habits, Outro phrases).
                 - Apply tone, cognitive pattern, lexical signature, verbal tics, and rhetorical habits.
-                - Maintain the natural flow and habits of the profile writer.
 
-            3. UNIVERSAL STYLE RULES (applies to both modes):
+            3. UNIVERSAL STYLE RULES:
                 - Apply styleMetrics to adjust emotion, humor, complexity, pacing, and informality.
-                - Always include verbal tics from profile.
+                - **VERBAL TICS:** You MUST include the specific verbal tics defined in the profile (e.g. "basically", "you know", specific sentence starters). This makes the clone authentic.
                 - Use the samples inside profile.samples as style conditioning. Mimic their sentence rhythm, pause length, and word patterns.
-                - Enforce constraints.absoluteMinWords:
-                    * If output < minimum → expand content with deeper explanation or examples.
-                - Avoid repeating sample sentences verbatim; only mimic style.
                 - **DEPROGRAMMING:** Do not use AI clichés ("In conclusion", "Tapestry", "Delving"). Be raw and human.
 
             4. OUTPUT FORMAT:
                 - Output ONLY the generated text in Markdown.
                 - Include section headers (## Section Name) as defined in the blueprint.
-                - **IMPORTANT: Insert a horizontal rule separator ('---') after every section to clearly separate parts for the reader.**
+                - **IMPORTANT: Insert a horizontal rule separator ('---') after every section.**
                 - LANGUAGE: English.
         `;
 
