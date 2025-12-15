@@ -562,7 +562,7 @@ export const refineText = async (
             model: "gemini-2.5-flash",
             contents: prompt,
             config: {
-                temperature: 1.5, // High temp for creative rewriting
+                 temperature: 1.5, // High temp for creative rewriting
             }
         });
 
