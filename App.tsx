@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Activity, Brain, FileText, Play, Sparkles, Terminal, Copy, Loader2, Save, Trash2, Plus, X, Video, Globe, Smartphone, BookOpen, Mic, RefreshCw, MapPin, CheckSquare, Square, Pencil, Check, Settings2, Folder, Key, Lock, LogIn, Cloud, Zap, AlertTriangle, Circle, Shield, List, Info, LayoutGrid, Ruler, PieChart, Anchor, ExternalLink, Wand2, Scissors, Quote, Grid, PlusCircle, MoveVertical } from 'lucide-react';
 import { analyzeTranscript, generateScript, suggestTravelLocations, refineText } from './services/geminiService';
@@ -13,7 +14,7 @@ import StyleRadar from './components/RadarChart';
 const DEFAULT_PROFILE: StyleProfile = {
   id: 'default-1',
   name: 'The Tech Minimalist',
-  description: 'Clean, logical, and slightly cynical tech reviews.',
+  description: 'Clean, logical, and slightly cynical tech reviews. Optimized for Gemini 2.5 Flash.',
   metrics: {
     humor: 30,
     logic: 90,
@@ -34,6 +35,17 @@ const DEFAULT_PROFILE: StyleProfile = {
     narrativeStyle: "Problem -> Solution -> Verdict.",
     emotionalCurve: "Flat, calm, slightly annoyed at bad design.",
     verbalTics: "Starts sentences with 'So,' frequently."
+  },
+  decisionProfile: {
+      decisionMakingBehavior: "Highly logical, prioritizes specs over marketing fluff.",
+      argumentSelectionBias: "Skeptical of new features unless proven useful.",
+      omissionPatterns: "Ignores packaging, unboxing experiences, and aesthetic flowery language.",
+      repeatedErrors: "Sentence fragments for emphasis. Starts sentences with conjunctions."
+  },
+  moralCompass: {
+      description: "Utilitarian. Value for money is the highest virtue.",
+      empathyLevel: "Low for brands, high for the consumer's wallet.",
+      judgmentReflex: "Immediate. Binary good/bad verdict."
   },
   quantitativeAnalysis: {
       totalWordCount: 500,
@@ -391,7 +403,9 @@ const App: React.FC = () => {
     console.error(error);
     const msg = error.message || error.toString();
     if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
-        alert(`⚠️ HẾT HẠN MỨC MIỄN PHÍ (Lỗi 429)\n\nAPI Keys hiện tại đã dùng hết giới hạn. Hệ thống đã thử xoay vòng nhưng tất cả đều hết hạn.\n\nGiải pháp:\n1. Thêm key mới vào danh sách.\n2. Quay lại vào ngày mai.`);
+        alert(`⚠️ HẾT HẠN MỨC MIỄN PHÍ (Lỗi 429)\n\nAPI Keys hiện tại đã dùng hết giới hạn (Gemini 2.5 Flash Free Tier). Hệ thống đã thử xoay vòng nhưng tất cả đều hết hạn.\n\nGiải pháp:\n1. Thêm key mới vào danh sách.\n2. Quay lại vào ngày mai.`);
+    } else if (msg.includes('503') || msg.includes('overloaded')) {
+        alert(`⚠️ SERVER QUÁ TẢI (Lỗi 503)\n\nGoogle Gemini đang gặp tình trạng quá tải tạm thời. Hệ thống đã tự động thử lại nhưng không thành công.\n\nVui lòng đợi 30 giây và thử lại.`);
     } else {
         alert(`${context}\nChi tiết: ${msg}`);
     }

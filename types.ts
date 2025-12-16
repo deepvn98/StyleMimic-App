@@ -18,6 +18,20 @@ export interface StyleDNA {
     verbalTics?: string; // Stuttering, fillers, imperfections
 }
 
+// NEW: Advanced Decision & Moral profiling from Phase 1 Analysis
+export interface DecisionProfile {
+    decisionMakingBehavior: string; // How they decide what to include/exclude
+    argumentSelectionBias: string; // Do they cherry-pick? Are they fair?
+    omissionPatterns: string; // What do they deliberately ignore?
+    repeatedErrors: string; // Authentic mistakes (grammar, logic jumps)
+}
+
+export interface MoralCompass {
+    description: string; // General moral stance
+    empathyLevel: string; // How much do they care about the reader/subject?
+    judgmentReflex: string; // How quickly do they judge?
+}
+
 export interface StructuralSection {
     sectionName: string; // e.g., "Introduction", "The Twist"
     estimatedWords: number; // Approx word count
@@ -56,6 +70,8 @@ export interface StyleProfile {
   typicalSectionLength: number; // Average words per section/thought
   contentType: ContentType; // Folder/Category for this profile
   styleDNA?: StyleDNA; // Advanced forensic data
+  decisionProfile?: DecisionProfile; // NEW: Phase 1 Data
+  moralCompass?: MoralCompass; // NEW: Phase 1 Data
   styleSamples?: string[]; // Actual writing samples for style mimicry
   quantitativeAnalysis?: QuantitativeAnalysis; // Physical structure data
   structuralPatterns?: StructuralPatterns; // NEW: Specific anchors
